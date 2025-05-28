@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 
+from typing import Optional
 from pathlib import Path
 from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder, OrdinalEncoder
 from sklearn.compose import ColumnTransformer
@@ -56,7 +57,12 @@ class ToNIoTPreProcessor:
         return df
 
     def preprocess_network_data(
-        self, df, label_col="label", drop_cols=None, scale_numeric=True, use_ordinal_encoding=True
+        self,
+        df: pd.DataFrame,
+        label_col: str = "label",
+        drop_cols: Optional[list[str]] = None,
+        scale_numeric: bool = True,
+        use_ordinal_encoding: bool = True,
     ):
         """
         Preprocess the ToN-IoT Network dataset for binary classification.
@@ -81,7 +87,7 @@ class ToNIoTPreProcessor:
         feature_names : list of str
             Feature names after preprocessing.
         """
-        if drop_cols is None:
+        if drop_cols is None or len(drop_cols) == 0:
             drop_cols = [
                 "ts",
                 "src_ip",
@@ -210,12 +216,24 @@ class ToNIoTPreProcessor:
             X_train[num_cols] = scaler.fit_transform(X_train[num_cols])
             X_test[num_cols] = scaler.transform(X_test[num_cols])
 
+        float_cols = X_train.select_dtypes(include="float64").columns
+        int_cols = X_train.select_dtypes(include="int64").columns
+
+        X_train[float_cols] = X_train[float_cols].astype("float32")
+        X_test[float_cols] = X_test[float_cols].astype("float32")
+        X_train[int_cols] = X_train[int_cols].astype("int32")
+        X_test[int_cols] = X_test[int_cols].astype("int32")
+
+        # Convert to float32 to save memory
+        y_train = y_train.astype(np.int32)
+        y_test = y_test.astype(np.int32)
+
         return X_train, X_test, y_train, y_test, X_train.columns.tolist()
 
     def get_ton_iot_network_data(
         self,
         label_col: str,
-        drop_cols: list[str] = [],
+        drop_cols: Optional[list[str]] = None,
         scale_numeric: bool = True,
         check_duplicates: bool = True,
     ):
@@ -268,6 +286,20 @@ class ToNIoTPreProcessor:
 
         y_train = df_train["_label"]
         X_train = df_train.drop(columns=["_label"])
+
+        float_cols = X_train.select_dtypes(include="float64").columns
+        int_cols = X_train.select_dtypes(include="int64").columns
+
+        X_train[float_cols] = X_train[float_cols].astype("float32")
+        X_test[float_cols] = X_test[float_cols].astype("float32")
+        X_train[int_cols] = X_train[int_cols].astype("int32")
+        X_test[int_cols] = X_test[int_cols].astype("int32")
+
+        y_train = y_train.astype(np.int32)
+        y_test = y_test.astype(np.int32)
+
+        logging.info(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
+        logging.info(f"X_test shape: {X_test.shape}, y_test shape: {y_test.shape}")
 
         return X_train, X_test, y_train, y_test, X_train.columns.tolist()
 
