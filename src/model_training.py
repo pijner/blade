@@ -104,6 +104,7 @@ def train_models(
 if __name__ == "__main__":
     from src.pre_processing import ToNIoTPreProcessor
 
+    DEBUG = True
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     preprocessor = ToNIoTPreProcessor(
         "data/ton_iot/Processed_datasets/Processed_Network_dataset/Network_dataset_1.csv",
@@ -116,10 +117,29 @@ if __name__ == "__main__":
     )
     X_train, y_train = balance_class_data(X_train, y_train)
 
-    print("\nClass value counts:")
-    print(y_train.value_counts(normalize=True))
-    print(y_test.value_counts(normalize=True))
-    print("-" * 50)
+    if DEBUG:
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+
+        xgb = MODEL_FACTORY["xgb"]
+        xgb.fit(X_train, y_train)
+        print("XGBoost model trained.")
+
+        importances = xgb.feature_importances_
+        top_features = pd.Series(importances, index=X_train.columns).sort_values(ascending=False)
+        top_features.head(20).plot(kind="barh", title="Top 20 XGBoost Feature Importances")
+        plt.tight_layout()
+        plt.show()
+
+        for col in ["duration", "dst_port", "proto"]:
+            sns.kdeplot(data=X_train.assign(label=y_train), x=col, hue="label")
+            plt.title(f"Distribution of {col} by label")
+            plt.show()
+
+        print("\nClass value counts:")
+        print(y_train.value_counts(normalize=True))
+        print(y_test.value_counts(normalize=True))
+        print("-" * 50)
 
     # Train models and evaluate
     results = train_models(X_train, y_train, X_test, y_test, models=["logreg", "rf", "mlp"])
