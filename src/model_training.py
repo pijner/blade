@@ -6,6 +6,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
+from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from joblib import dump
 
@@ -13,8 +14,35 @@ MODEL_FACTORY = {
     "logreg": LogisticRegression(max_iter=1000, class_weight="balanced"),
     "rf": RandomForestClassifier(n_estimators=100, class_weight="balanced"),
     "svm": SVC(probability=True, class_weight="balanced"),
-    "mlp": MLPClassifier(hidden_layer_sizes=(128, 128, 128), max_iter=300),
+    "mlp": MLPClassifier(hidden_layer_sizes=(32, 32), max_iter=300),
+    "xgb": XGBClassifier(scale_pos_weight=1.0),
 }
+
+
+def balance_class_data(X, y):
+    """
+    Balance the dataset by undersampling the majority class.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Feature matrix.
+    y : pandas.Series
+        Labels.
+
+    Returns
+    -------
+    X_balanced, y_balanced : pandas.DataFrame, pandas.Series
+        Balanced feature matrix and labels.
+    """
+    class_counts = y.value_counts()
+    min_count = class_counts.min()
+
+    balanced_X = pd.concat([X[y == cls].sample(min_count, random_state=42) for cls in class_counts.index])
+
+    balanced_y = pd.concat([y[y == cls].sample(min_count, random_state=42) for cls in class_counts.index])
+
+    return balanced_X, balanced_y
 
 
 def train_models(
@@ -86,6 +114,8 @@ if __name__ == "__main__":
         scale_numeric=True,
         check_duplicates=True,
     )
+    X_train, y_train = balance_class_data(X_train, y_train)
+
     print("\nClass value counts:")
     print(y_train.value_counts(normalize=True))
     print(y_test.value_counts(normalize=True))
