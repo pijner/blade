@@ -109,11 +109,11 @@ if __name__ == "__main__":
     preprocessor = ToNIoTPreProcessor(
         "data/ton_iot/Processed_datasets/Processed_Network_dataset",
         "data/ton_iot/Train_Test_datasets/Train_Test_Network_dataset/train_test_network.csv",
+        save_processed=True,
+        save_path="data/ton_iot/preprocessed_data_splits",
     )
     X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
-        label_col="label",
-        scale_numeric=True,
-        check_duplicates=True,
+        label_col="label", scale_numeric=True, check_duplicates=True, try_load_preprocessed=True
     )
     X_train, y_train = balance_class_data(X_train, y_train)
 
@@ -129,12 +129,12 @@ if __name__ == "__main__":
         top_features = pd.Series(importances, index=X_train.columns).sort_values(ascending=False)
         top_features.head(20).plot(kind="barh", title="Top 20 XGBoost Feature Importances")
         plt.tight_layout()
-        plt.show()
+        plt.savefig('top_features.png')
 
         for col in ["duration", "dst_port", "proto"]:
             sns.kdeplot(data=X_train.assign(label=y_train), x=col, hue="label")
             plt.title(f"Distribution of {col} by label")
-            plt.show()
+            plt.savefig(f'distribution_{col}.png')
 
         print("\nClass value counts:")
         print(y_train.value_counts(normalize=True))

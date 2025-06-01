@@ -263,7 +263,7 @@ class ToNIoTPreProcessor:
         y_train = pd.read_csv(Path(data_path).joinpath("y_train.csv")).squeeze()
         y_test = pd.read_csv(Path(data_path).joinpath("y_test.csv")).squeeze()
 
-        return X_train, X_test, y_train, y_test
+        return X_train, X_test, y_train, y_test, X_train.columns.tolist()
 
     def check_label_conflicts(self, df, label_col="label"):
         """
