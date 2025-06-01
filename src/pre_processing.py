@@ -95,7 +95,7 @@ class ToNIoTPreProcessor:
         if self.column_transformer is None:
             if use_ordinal_encoding:
                 logging.info("Using Ordinal Encoding for categorical features.")
-                cat_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1, dtype='np.float32')
+                cat_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1, dtype="np.float32")
             else:
                 logging.info("Using One-Hot Encoding for categorical features.")
                 cat_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=True)

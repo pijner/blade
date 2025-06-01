@@ -107,7 +107,7 @@ if __name__ == "__main__":
     DEBUG = True
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     preprocessor = ToNIoTPreProcessor(
-        "data/ton_iot/Processed_datasets/Processed_Network_dataset/Network_dataset_1.csv",
+        "data/ton_iot/Processed_datasets/Processed_Network_dataset",
         "data/ton_iot/Train_Test_datasets/Train_Test_Network_dataset/train_test_network.csv",
     )
     X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
@@ -142,5 +142,5 @@ if __name__ == "__main__":
         print("-" * 50)
 
     # Train models and evaluate
-    results = train_models(X_train, y_train, X_test, y_test, models=["logreg", "rf", "mlp"])
+    results = train_models(X_train, y_train, X_test, y_test, models=["logreg", "rf", "mlp", "xgb"])
     print("Training results:", results)
