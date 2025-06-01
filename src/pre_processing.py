@@ -9,58 +9,46 @@ from sklearn.compose import ColumnTransformer
 
 
 class ToNIoTPreProcessor:
-    def __init__(self, processed_data_path: str, test_data_path: str):
-        self.processed_data_path = Path(processed_data_path).as_posix()
+    def __init__(self, processed_data_dir: str, test_data_path: str):
+        self.processed_data_dir = Path(processed_data_dir).as_posix()
         self.test_data_path = Path(test_data_path).as_posix()
         self.column_transformer = None
 
-    def _load_data(self, csv_path: str) -> pd.DataFrame:
+        self.network_default_drop_cols = [
+            "ts",
+            "src_ip",
+            "dst_ip",
+            "dns_query",
+            "ssl_subject",
+            "ssl_issuer",
+            "http_uri",
+            "http_referrer",
+            "http_user_agent",
+            "http_orig_mime_types",
+            "http_resp_mime_types",
+            "weird_addl",
+            "type",
+        ]
+
+    def _load_data(self, csv_path: str, drop_cols: Optional[list[str]] = None) -> pd.DataFrame:
         """
         Load the ToN-IoT data from the specified csv path.
         """
         try:
             df = pd.read_csv(csv_path)
             logging.info(f"Loaded processed data from {csv_path}")
+            if drop_cols is not None:
+                df = df.drop(columns=[col for col in drop_cols if col in df.columns], errors="ignore")
+
             return df
         except FileNotFoundError as e:
             logging.error(f"Processed data file not found at {csv_path}")
             raise e
 
-    def pre_process_iot(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Preprocess IoT telemetry dataframe (e.g., fridge dataset) by converting date/time fields
-        into useful features and standardizing the format.
-
-        Parameters
-        ----------
-        df : pandas.DataFrame
-            Raw dataframe containing at least 'date' and 'time' columns.
-
-        Returns
-        -------
-        df : pandas.DataFrame
-            Processed dataframe with additional time-based features and a unified datetime field.
-        """
-        df["date"] = df["date"].astype(str).str.strip()
-        df["time"] = df["time"].astype(str).str.strip()
-
-        df["datetime"] = pd.to_datetime(df["date"] + " " + df["time"], format="%d-%b-%y %H:%M:%S", errors="coerce")
-        df = df.dropna(subset=["datetime"])
-
-        # Extract time-based features
-        df["hour"] = df["datetime"].dt.hour
-        df["dayofweek"] = df["datetime"].dt.dayofweek
-        df["month"] = df["datetime"].dt.month
-
-        df = df.drop(columns=["date", "time", "datetime"])
-
-        return df
-
     def preprocess_network_data(
         self,
         df: pd.DataFrame,
         label_col: str = "label",
-        drop_cols: Optional[list[str]] = None,
         scale_numeric: bool = True,
         use_ordinal_encoding: bool = True,
     ):
@@ -73,8 +61,6 @@ class ToNIoTPreProcessor:
             Raw dataframe loaded from IoT-network.csv.
         label_col : str, default='label'
             Name of the label column.
-        drop_cols : list of str or None
-            Columns to drop (e.g., IPs, timestamps, URI fields).
         scale_numeric : bool, default=True
             Whether to scale numeric features using StandardScaler.
 
@@ -87,25 +73,7 @@ class ToNIoTPreProcessor:
         feature_names : list of str
             Feature names after preprocessing.
         """
-        if drop_cols is None or len(drop_cols) == 0:
-            drop_cols = [
-                "ts",
-                "src_ip",
-                "dst_ip",
-                "dns_query",
-                "ssl_subject",
-                "ssl_issuer",
-                "http_uri",
-                "http_referrer",
-                "http_user_agent",
-                "http_orig_mime_types",
-                "http_resp_mime_types",
-                "weird_addl",
-                "type",
-            ]
 
-        df = df.copy()
-        df = df.drop(columns=[col for col in drop_cols if col in df.columns], errors="ignore")
         df = df.dropna()
 
         df["src_bytes"] = pd.to_numeric(df["src_bytes"], errors="coerce")
@@ -116,7 +84,7 @@ class ToNIoTPreProcessor:
 
         # Identify column types
         cat_cols = X.select_dtypes(include=["object"]).columns.tolist()
-        num_cols = X.select_dtypes(include=["int64", "float64"]).columns.tolist()
+        num_cols = X.select_dtypes(include=["int32", "float32"]).columns.tolist()
 
         for col in cat_cols:
             types = X[col].map(type).unique()
@@ -127,14 +95,14 @@ class ToNIoTPreProcessor:
         if self.column_transformer is None:
             if use_ordinal_encoding:
                 logging.info("Using Ordinal Encoding for categorical features.")
-                cat_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+                cat_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1, dtype='np.float32')
             else:
                 logging.info("Using One-Hot Encoding for categorical features.")
                 cat_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=True)
 
             self.column_transformer = ColumnTransformer(
                 [
-                    ("num", StandardScaler() if scale_numeric else "passthrough", num_cols),
+                    ("num", StandardScaler(copy=False) if scale_numeric else "passthrough", num_cols),
                     ("cat", cat_encoder, cat_cols),
                 ]
             )
@@ -150,85 +118,6 @@ class ToNIoTPreProcessor:
         feature_names = num_cols + list(cat_features)
 
         return pd.DataFrame(X_processed, columns=feature_names), y.reset_index(drop=True), feature_names
-
-    def get_ton_iot_IOT_data(
-        self,
-        label_col: str,
-        drop_cols: list[str] = [],
-        scale_numeric: bool = True,
-        encode_categorical: bool = True,
-        check_duplicates: bool = True,
-    ):
-        df_full = self._load_data(self.processed_data_path)
-        df_test = self._load_data(self.test_data_path)
-
-        # Align columns
-        df_full = df_full[df_test.columns]
-        logging.info(f"Full dataset shape: {df_full.shape}, Test dataset shape: {df_test.shape}")
-
-        df_full = self.pre_process_iot(df_full)
-        df_test = self.pre_process_iot(df_test)
-
-        logging.info(f"Full dataset shape: {df_full.shape}, Test dataset shape: {df_test.shape}")
-
-        # Check for label conflicts
-        conflicts, conflict_count = self.check_label_conflicts(df_full, label_col)
-        if conflict_count > 0:
-            logging.warning(f"Found {conflict_count} label conflicts in training data. Conflicting rows:\n{conflicts}")
-        else:
-            logging.info("No label conflicts found in training data.")
-
-        if check_duplicates:
-            logging.info("Duplicate Check:")
-            full_dupes = df_full.duplicated().sum()
-            test_dupes = df_test.duplicated().sum()
-            ts_dupes = df_full.duplicated(subset=["ts"]).sum() if "ts" in df_full.columns else "N/A"
-
-            logging.info(f"  Full dataset: {full_dupes} duplicate rows, shape: {df_full.shape}")
-            logging.info(f"  Full dataset: {ts_dupes} rows with duplicate timestamps, shape: {df_full.shape}")
-            logging.info(f"  Test dataset: {test_dupes} duplicate rows, shape: {df_test.shape}")
-
-        # Create train set by subtracting test set from full set
-        df_train = pd.concat([df_full, df_test]).drop_duplicates(keep=False)
-
-        # Drop unnecessary columns
-        df_train = df_train.drop(columns=[col for col in drop_cols if col in df_train.columns])
-        df_test = df_test.drop(columns=[col for col in drop_cols if col in df_test.columns])
-
-        # Split labels and features
-        y_train = df_train[label_col]
-        X_train = df_train.drop(columns=[label_col])
-        y_test = df_test[label_col]
-        X_test = df_test.drop(columns=[label_col])
-
-        # Process feature types
-        cat_cols = X_train.select_dtypes(include=["object", "category"]).columns.tolist()
-        num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
-
-        if encode_categorical:
-            for col in cat_cols:
-                le = LabelEncoder()
-                X_train[col] = le.fit_transform(X_train[col].astype(str))
-                X_test[col] = le.transform(X_test[col].astype(str))
-
-        if scale_numeric and num_cols:
-            scaler = StandardScaler()
-            X_train[num_cols] = scaler.fit_transform(X_train[num_cols])
-            X_test[num_cols] = scaler.transform(X_test[num_cols])
-
-        float_cols = X_train.select_dtypes(include="float64").columns
-        int_cols = X_train.select_dtypes(include="int64").columns
-
-        X_train[float_cols] = X_train[float_cols].astype("float32")
-        X_test[float_cols] = X_test[float_cols].astype("float32")
-        X_train[int_cols] = X_train[int_cols].astype("int32")
-        X_test[int_cols] = X_test[int_cols].astype("int32")
-
-        # Convert to float32 to save memory
-        y_train = y_train.astype(np.int32)
-        y_test = y_test.astype(np.int32)
-
-        return X_train, X_test, y_train, y_test, X_train.columns.tolist()
 
     def get_ton_iot_network_data(
         self,
@@ -246,20 +135,34 @@ class ToNIoTPreProcessor:
         y_train, y_test : pandas.Series
         feature_names : list of str
         """
-        df_full = self._load_data(self.processed_data_path)
-        df_test = self._load_data(self.test_data_path)
+        # load all csv files from the processed data directory
+        csv_files = list(Path(self.processed_data_dir).glob("*.csv"))
+        if not csv_files:
+            raise FileNotFoundError(f"No processed data files found in {self.processed_data_dir}")
+
+        all_dfs = []
+        for csv_file in csv_files:
+            logging.info(f"Loading data from data file: {csv_file.name}")
+            df = self._load_data(csv_file, drop_cols=drop_cols or self.network_default_drop_cols)
+
+            # convert 64 bit values to 32 bit
+            float_cols = df.select_dtypes(include="float64").columns
+            int_cols = df.select_dtypes(include="int64").columns
+            df[float_cols] = df[float_cols].astype("float32")
+            df[int_cols] = df[int_cols].astype("int32")
+
+            all_dfs.append(df)
+
+        df_full = pd.concat(all_dfs, ignore_index=True)
+        df_test = self._load_data(self.test_data_path, drop_cols=drop_cols or self.network_default_drop_cols)
 
         # Align schema
         df_full = df_full[df_test.columns]
         logging.info(f"Full dataset shape: {df_full.shape}, Test dataset shape: {df_test.shape}")
 
         # Preprocess both
-        df_full = self.preprocess_network_data(
-            df_full, label_col=label_col, drop_cols=drop_cols, scale_numeric=scale_numeric
-        )
-        df_test = self.preprocess_network_data(
-            df_test, label_col=label_col, drop_cols=drop_cols, scale_numeric=scale_numeric
-        )
+        df_full = self.preprocess_network_data(df_full, label_col=label_col, scale_numeric=scale_numeric)
+        df_test = self.preprocess_network_data(df_test, label_col=label_col, scale_numeric=scale_numeric)
 
         # Unpack outputs
         X_full, y_full, _ = df_full
@@ -340,10 +243,8 @@ class ToNIoTPreProcessor:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     preprocessor = ToNIoTPreProcessor(
-        "data/ton_iot/Processed_datasets/Processed_Network_dataset/Network_dataset_1.csv",
+        "data/ton_iot/Processed_datasets/Processed_Network_dataset",
         "data/ton_iot/Train_Test_datasets/Train_Test_Network_dataset/train_test_network.csv",
-        # "data/ton_iot/Processed_datasets/Processed_IoT_dataset/IoT_Fridge.csv",
-        # "data/ton_iot/Train_Test_datasets/Train_Test_IoT_dataset/Train_Test_IoT_Fridge.csv",
     )
     X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
         label_col="label",
