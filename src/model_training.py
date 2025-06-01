@@ -2,24 +2,12 @@ import logging
 import pandas as pd
 
 from pathlib import Path
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
-from sklearn.neural_network import MLPClassifier
-from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from joblib import dump
-
-MODEL_FACTORY = {
-    "logreg": LogisticRegression(max_iter=1000, class_weight="balanced"),
-    "rf": RandomForestClassifier(n_estimators=100, class_weight="balanced"),
-    "svm": SVC(probability=True, class_weight="balanced"),
-    "mlp": MLPClassifier(hidden_layer_sizes=(32, 32), max_iter=300),
-    "xgb": XGBClassifier(scale_pos_weight=1.0),
-}
+from src.model_factory import MODEL_FACTORY, set_seed
 
 
-def balance_class_data(X, y):
+def balance_class_data(X, y, method="SMOTETomek"):
     """
     Balance the dataset by undersampling the majority class.
 
@@ -35,6 +23,19 @@ def balance_class_data(X, y):
     X_balanced, y_balanced : pandas.DataFrame, pandas.Series
         Balanced feature matrix and labels.
     """
+    if method == "SMOTETomek":
+        from imblearn.combine import SMOTETomek
+
+        smote_tomek = SMOTETomek(random_state=42)
+        X_balanced, y_balanced = smote_tomek.fit_resample(X, y)
+        return X_balanced, y_balanced
+    elif method == "SMOTE":
+        from imblearn.over_sampling import SMOTE
+
+        smote = SMOTE(random_state=42)
+        X_balanced, y_balanced = smote.fit_resample(X, y)
+        return X_balanced, y_balanced
+
     class_counts = y.value_counts()
     min_count = class_counts.min()
 
@@ -75,11 +76,18 @@ def train_models(
     """
     Path(model_dir).mkdir(parents=True, exist_ok=True)
 
+    input_dim = X_train.shape[1]
+    num_classes = len(y_train.unique())
+
     for model_name in models:
         if model_name not in MODEL_FACTORY:
             raise ValueError(f"Model '{model_name}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
 
-    models = {name: MODEL_FACTORY[name] for name in models if name in MODEL_FACTORY}
+    models = {
+        name: MODEL_FACTORY[name](input_dim, num_classes) if name in ["mlp", "tabnet"] else MODEL_FACTORY[name]
+        for name in models
+        if name in MODEL_FACTORY
+    }
 
     results = {}
 
@@ -104,6 +112,7 @@ def train_models(
 if __name__ == "__main__":
     from src.pre_processing import ToNIoTPreProcessor
 
+    set_seed(42)
     DEBUG = True
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     preprocessor = ToNIoTPreProcessor(
@@ -115,32 +124,16 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
         label_col="label", scale_numeric=True, check_duplicates=True, try_load_preprocessed=True
     )
-    X_train, y_train = balance_class_data(X_train, y_train)
 
-    if DEBUG:
-        import seaborn as sns
-        import matplotlib.pyplot as plt
+    logging.info("Training and testing data loaded successfully.")
 
-        xgb = MODEL_FACTORY["xgb"]
-        xgb.fit(X_train, y_train)
-        print("XGBoost model trained.")
+    X_train, y_train = balance_class_data(X_train, y_train, method="SMOTEx")
 
-        importances = xgb.feature_importances_
-        top_features = pd.Series(importances, index=X_train.columns).sort_values(ascending=False)
-        top_features.head(20).plot(kind="barh", title="Top 20 XGBoost Feature Importances")
-        plt.tight_layout()
-        plt.savefig('top_features.png')
-
-        for col in ["duration", "dst_port", "proto"]:
-            sns.kdeplot(data=X_train.assign(label=y_train), x=col, hue="label")
-            plt.title(f"Distribution of {col} by label")
-            plt.savefig(f'distribution_{col}.png')
-
-        print("\nClass value counts:")
-        print(y_train.value_counts(normalize=True))
-        print(y_test.value_counts(normalize=True))
-        print("-" * 50)
+    print("\nClass value counts:")
+    print(y_train.value_counts(normalize=True))
+    print(y_test.value_counts(normalize=True))
+    print("-" * 50)
 
     # Train models and evaluate
-    results = train_models(X_train, y_train, X_test, y_test, models=["logreg", "rf", "mlp", "xgb"])
+    results = train_models(X_train, y_train, X_test, y_test, models=["mlp", "xgb"])
     print("Training results:", results)
