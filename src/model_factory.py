@@ -49,7 +49,7 @@ class TorchMLPWrapper:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
-    def fit(self, X_train, y_train, batch_size=1024, epochs=10, lr=1e-4):
+    def fit(self, X_train, y_train, batch_size=1024, epochs=50, lr=1e-4):
         self.model.train()
 
         # Convert input data to torch tensors

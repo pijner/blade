@@ -7,7 +7,7 @@ from joblib import dump
 from src.model_factory import MODEL_FACTORY, set_seed
 
 
-def balance_class_data(X, y, method="SMOTETomek"):
+def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=True):
     """
     Balance the dataset by undersampling the majority class.
 
@@ -23,27 +23,44 @@ def balance_class_data(X, y, method="SMOTETomek"):
     X_balanced, y_balanced : pandas.DataFrame, pandas.Series
         Balanced feature matrix and labels.
     """
+    # Step 1: Optional reduction of the largest class
+    y_counts = y.value_counts()
+    if reduce_majority and len(y_counts) > 1:
+        label_cap = y_counts.sort_values(ascending=False).iloc[3]
+
+        df = X.copy()
+        df["_label"] = y.values  # Avoid index misalignment
+
+        df_balanced = (
+            df.groupby("_label")
+            .apply(lambda x: x.sample(min(len(x), label_cap), random_state=42))
+            .reset_index(drop=True)
+        )
+
+        y = df_balanced.pop("_label")
+        X = df_balanced
+
+    # Step 2: Apply balancing method
     if method == "SMOTETomek":
         from imblearn.combine import SMOTETomek
 
         smote_tomek = SMOTETomek(random_state=42)
         X_balanced, y_balanced = smote_tomek.fit_resample(X, y)
-        return X_balanced, y_balanced
     elif method == "SMOTE":
         from imblearn.over_sampling import SMOTE
 
-        smote = SMOTE(random_state=42)
+        smote = SMOTE(random_state=42, k_neighbors=3)
         X_balanced, y_balanced = smote.fit_resample(X, y)
-        return X_balanced, y_balanced
+    elif method == "undersample":
+        min_count = y.value_counts().min()
+        X_balanced = pd.concat([X[y == cls].sample(min_count, random_state=42) for cls in y.unique()])
+        y_balanced = pd.concat([y[y == cls].sample(min_count, random_state=42) for cls in y.unique()])
+    elif method == "none":
+        return X, y  # No balancing applied
+    else:
+        raise ValueError("Invalid method. Choose from 'SMOTE', 'SMOTETomek', or 'undersample'.")
 
-    class_counts = y.value_counts()
-    min_count = class_counts.min()
-
-    balanced_X = pd.concat([X[y == cls].sample(min_count, random_state=42) for cls in class_counts.index])
-
-    balanced_y = pd.concat([y[y == cls].sample(min_count, random_state=42) for cls in class_counts.index])
-
-    return balanced_X, balanced_y
+    return X_balanced, y_balanced
 
 
 def train_models(
@@ -77,7 +94,7 @@ def train_models(
     Path(model_dir).mkdir(parents=True, exist_ok=True)
 
     input_dim = X_train.shape[1]
-    num_classes = len(y_train.unique())
+    num_classes = y_train.max() - y_train.min() + 1
 
     for model_name in models:
         if model_name not in MODEL_FACTORY:
@@ -101,6 +118,21 @@ def train_models(
         print(f"Accuracy: {acc:.4f}")
         print(classification_report(y_test, preds, digits=3))
 
+        if name == "xgb":
+            # plot feature importances for XGBoost
+            import matplotlib.pyplot as plt
+            import xgboost as xgb
+
+            xgb.plot_importance(model)
+            plt.title("Feature Importances")
+            plt.tight_layout()
+            plt.savefig(f"{model_dir}/{name}_feature_importances.png")
+
+            # print feature importances
+            feature_importances = pd.Series(model.feature_importances_, index=X_train.columns)
+            print("\nFeature Importances:")
+            print(feature_importances.sort_values(ascending=False))
+
         if save_models:
             path = f"{model_dir}/{name}_clf.joblib"
             dump(model, path)
@@ -122,18 +154,27 @@ if __name__ == "__main__":
         save_path="data/ton_iot/preprocessed_data_splits",
     )
     X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
-        label_col="label", scale_numeric=True, check_duplicates=True, try_load_preprocessed=True
+        label_col="type",
+        scale_numeric=True,
+        check_duplicates=True,
+        try_load_preprocessed=True,
+        drop_labels=["mitm", "ransomware"],
     )
 
     logging.info("Training and testing data loaded successfully.")
 
-    X_train, y_train = balance_class_data(X_train, y_train, method="SMOTEx")
+    print("\nClass value counts (before balancing):")
+    print(y_train.value_counts(normalize=True))
+    print(y_test.value_counts(normalize=True))
+    print("-" * 50)
 
-    print("\nClass value counts:")
+    X_train, y_train = balance_class_data(X_train, y_train, method="undersample", reduce_majority=True)
+
+    print("\nClass value counts (after balancing):")
     print(y_train.value_counts(normalize=True))
     print(y_test.value_counts(normalize=True))
     print("-" * 50)
 
     # Train models and evaluate
-    results = train_models(X_train, y_train, X_test, y_test, models=["mlp", "xgb"])
+    results = train_models(X_train, y_train, X_test, y_test, models=["xgb", "rf", "mlp", "logreg"])
     print("Training results:", results)

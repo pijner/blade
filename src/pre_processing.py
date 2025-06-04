@@ -28,6 +28,7 @@ class ToNIoTPreProcessor:
         self.save_path = Path(save_path).as_posix() if save_path else None
 
         self.column_transformer = None
+        self.label_encoder = None
 
         self.network_default_drop_cols = [
             "ts",
@@ -42,7 +43,19 @@ class ToNIoTPreProcessor:
             "http_orig_mime_types",
             "http_resp_mime_types",
             "weird_addl",
-            "type",
+            "label",
+            # "http_trans_depth",
+            # "weird_name",
+            # "http_status_code",
+            # "http_method",
+            # "http_response_body_len",
+            # "ssl_version",
+            # "ssl_established",
+            # "http_version",
+            # "weird_notice",
+            # "dns_AA",
+            # "dns_qclass",
+            # "http_request_body_len",
         ]
 
     def _load_data(self, csv_path: str, drop_cols: Optional[list[str]] = None) -> pd.DataFrame:
@@ -69,7 +82,7 @@ class ToNIoTPreProcessor:
     def preprocess_network_data(
         self,
         df: pd.DataFrame,
-        label_col: str = "label",
+        label_col: str = "type",
         scale_numeric: bool = True,
         use_ordinal_encoding: bool = True,
     ):
@@ -80,7 +93,7 @@ class ToNIoTPreProcessor:
         ----------
         df : pandas.DataFrame
             Raw dataframe loaded from IoT-network.csv.
-        label_col : str, default='label'
+        label_col : str, default='type'
             Name of the label column.
         scale_numeric : bool, default=True
             Whether to scale numeric features using StandardScaler.
@@ -99,6 +112,24 @@ class ToNIoTPreProcessor:
 
         df["src_bytes"] = pd.to_numeric(df["src_bytes"], errors="coerce")
         df = df.dropna(subset=["src_bytes"])
+
+        if label_col == "type":
+            # encode categorical labels in 'type'
+            logging.info("Encoding 'type' column as categorical labels.")
+            if self.label_encoder is None:
+                self.label_encoder = LabelEncoder()
+                df[label_col] = self.label_encoder.fit_transform(df[label_col])
+                # print label mapping
+                logging.info("Label mapping")
+                # write label mapping to file
+                with open(Path(self.save_path).joinpath("label_mapping.txt"), "w") as f:
+                    for label, encoded in zip(
+                        self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_)
+                    ):
+                        f.write(f"{label}: {encoded}\n")
+                        logging.info(f"{label}: {encoded}")
+            else:
+                df[label_col] = self.label_encoder.transform(df[label_col])
 
         y = df[label_col].astype(np.int32)
         X = df.drop(columns=[label_col])
@@ -119,7 +150,7 @@ class ToNIoTPreProcessor:
                 cat_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1, dtype=np.float32)
             else:
                 logging.info("Using One-Hot Encoding for categorical features.")
-                cat_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=True)
+                cat_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False, dtype=np.uint8)
 
             self.column_transformer = ColumnTransformer(
                 [
@@ -144,6 +175,7 @@ class ToNIoTPreProcessor:
         self,
         label_col: str,
         drop_cols: Optional[list[str]] = None,
+        drop_labels: Optional[list[str]] = None,
         scale_numeric: bool = True,
         check_duplicates: bool = True,
         try_load_preprocessed: bool = True,
@@ -179,13 +211,39 @@ class ToNIoTPreProcessor:
         df_full = pd.concat(all_dfs, ignore_index=True)
         df_test = self._load_data(self.test_data_path, drop_cols=drop_cols or self.network_default_drop_cols)
 
+        print("-" * 50)
+        logging.info(f"Label distribution in full dataset:\n{df_full[label_col].value_counts()}")
+        logging.info(f"Label distribution in test dataset:\n{df_test[label_col].value_counts()}")
+        print("-" * 50)
+
         # Align schema
         df_full = df_full[df_test.columns]
         logging.info(f"Full dataset shape: {df_full.shape}, Test dataset shape: {df_test.shape}")
 
+        # Drop specified labels if provided
+        if drop_labels is not None:
+            logging.info(f"Dropping labels: {drop_labels}")
+            df_full = df_full[~df_full[label_col].isin(drop_labels)]
+            df_test = df_test[~df_test[label_col].isin(drop_labels)]
+
+        # Check for label conflicts before pre-processing
+        conflicts, conflict_count = self.check_label_conflicts(df_full, label_col=label_col)
+        if conflict_count > 0:
+            logging.warning(
+                f"⚠️ Found {conflict_count} label conflicts in full dataset before preprocessing.\n{conflicts.head()}"
+            )
+            logging.info("Resolving conflicts by removing all conflicting rows...")
+            df_full = self.resolve_conflicts(df_full, conflicts, label_col=label_col)
+        else:
+            logging.info("✅ No label conflicts found in full dataset before preprocessing.")
+
         # Preprocess both
-        df_full = self.preprocess_network_data(df_full, label_col=label_col, scale_numeric=scale_numeric)
-        df_test = self.preprocess_network_data(df_test, label_col=label_col, scale_numeric=scale_numeric)
+        df_full = self.preprocess_network_data(
+            df_full, label_col=label_col, scale_numeric=scale_numeric, use_ordinal_encoding=False
+        )
+        df_test = self.preprocess_network_data(
+            df_test, label_col=label_col, scale_numeric=scale_numeric, use_ordinal_encoding=False
+        )
 
         # Unpack outputs
         X_full, y_full, _ = df_full
@@ -195,20 +253,16 @@ class ToNIoTPreProcessor:
         df_full_combined = X_full.copy()
         df_full_combined[label_col] = y_full
 
-        conflicts, conflict_count = self.check_label_conflicts(df_full_combined, label_col=label_col)
-        if conflict_count > 0:
-            logging.warning(f"⚠️ Found {conflict_count} label conflicts in training data.\n{conflicts.head()}")
-            logging.info("Resolving conflicts by removing all conflicting rows...")
-            df_full_combined = self.resolve_conflicts(df_full_combined, conflicts, label_col=label_col)
-            X_full = df_full_combined.drop(columns=[label_col])
-            y_full = df_full_combined[label_col]
-        else:
-            logging.info("✅ No label conflicts found.")
-
         if check_duplicates:
             logging.info("Duplicate Check:")
             logging.info(f"  Full dataset: {X_full.duplicated().sum()} duplicate rows")
             logging.info(f"  Test dataset: {X_test.duplicated().sum()} duplicate rows")
+            # drop duplicates in full dataset
+            df_full_combined = df_full_combined.drop_duplicates(subset=X_full.columns, keep="first")
+            logging.info(f"  Full dataset after dropping duplicates: {df_full_combined.shape[0]} rows")
+            # reassign X_full and y_full
+            X_full = df_full_combined.drop(columns=[label_col])
+            y_full = df_full_combined[label_col]
 
         # Create training set by subtracting test from full
         df_train = pd.concat([X_full.assign(_label=y_full), X_test.assign(_label=y_test), X_test.assign(_label=y_test)])
@@ -265,7 +319,7 @@ class ToNIoTPreProcessor:
 
         return X_train, X_test, y_train, y_test, X_train.columns.tolist()
 
-    def check_label_conflicts(self, df, label_col="label"):
+    def check_label_conflicts(self, df, label_col="type"):
         """
         Check for label conflicts in the dataset: rows with identical feature values
         but different labels.
@@ -336,7 +390,11 @@ if __name__ == "__main__":
         save_path="data/ton_iot/preprocessed_data_splits",
     )
     X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
-        label_col="label", scale_numeric=True, check_duplicates=True, try_load_preprocessed=True
+        label_col="type",
+        scale_numeric=True,
+        check_duplicates=False,
+        try_load_preprocessed=False,
+        drop_labels=["mitm", "ransomware"],
     )
 
     print(f"Features: {feature_names}")
