@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+import json
 
 from typing import Optional
 from pathlib import Path
@@ -30,6 +31,10 @@ class ToNIoTPreProcessor:
         self.column_transformer = None
         self.label_encoder = None
 
+        self.cat_cols = None
+        self.num_cols = None
+        self.metadata = {}
+
         self.network_default_drop_cols = [
             "ts",
             "src_ip",
@@ -44,18 +49,19 @@ class ToNIoTPreProcessor:
             "http_resp_mime_types",
             "weird_addl",
             "label",
-            # "http_trans_depth",
-            # "weird_name",
-            # "http_status_code",
-            # "http_method",
-            # "http_response_body_len",
-            # "ssl_version",
-            # "ssl_established",
-            # "http_version",
-            # "weird_notice",
-            # "dns_AA",
-            # "dns_qclass",
-            # "http_request_body_len",
+            "http_response_body_len",
+            "http_status_code",
+            "ssl_version",
+            "ssl_established",
+            "ssl_cipher",
+            "http_version",
+            "weird_notice",
+            "http_request_body_len",
+            "ssl_resumed",
+            "missed_bytes",
+            "http_trans_depth",
+            "weird_name",
+            "http_method",
         ]
 
     def _load_data(self, csv_path: str, drop_cols: Optional[list[str]] = None) -> pd.DataFrame:
@@ -68,16 +74,32 @@ class ToNIoTPreProcessor:
             if drop_cols is not None:
                 df = df.drop(columns=[col for col in drop_cols if col in df.columns], errors="ignore")
 
-            # convert 64 bit values to 32 bit
-            float_cols = df.select_dtypes(include="float64").columns
-            int_cols = df.select_dtypes(include="int64").columns
-            df[float_cols] = df[float_cols].astype("float32")
-            df[int_cols] = df[int_cols].astype("int32")
-
-            return df
+            return self.convert_to_32bit(df)
         except FileNotFoundError as e:
             logging.error(f"Processed data file not found at {csv_path}")
             raise e
+
+    def convert_to_32bit(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convert all float64 and int64 columns in the DataFrame to float32 and int32 respectively.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            The DataFrame to convert.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The DataFrame with converted column types.
+        """
+        float_cols = df.select_dtypes(include="float64").columns
+        int_cols = df.select_dtypes(include="int64").columns
+
+        df[float_cols] = df[float_cols].astype("float32")
+        df[int_cols] = df[int_cols].astype("int32")
+
+        return df
 
     def preprocess_network_data(
         self,
@@ -135,10 +157,12 @@ class ToNIoTPreProcessor:
         X = df.drop(columns=[label_col])
 
         # Identify column types
-        cat_cols = X.select_dtypes(include=["object"]).columns.tolist()
-        num_cols = X.select_dtypes(include=["int32", "float32", "int64", "float64"]).columns.tolist()
+        if self.cat_cols is None:
+            self.cat_cols = X.select_dtypes(include=["object"]).columns.tolist()
+        if self.num_cols is None:
+            self.num_cols = X.select_dtypes(include=["int32", "float32", "int64", "float64"]).columns.tolist()
 
-        for col in cat_cols:
+        for col in self.cat_cols:
             types = X[col].map(type).unique()
             if len(types) > 1:
                 logging.warning(f"⚠️ Column '{col}' contains mixed types: {types}")
@@ -154,8 +178,8 @@ class ToNIoTPreProcessor:
 
             self.column_transformer = ColumnTransformer(
                 [
-                    ("num", StandardScaler(copy=False) if scale_numeric else "passthrough", num_cols),
-                    ("cat", cat_encoder, cat_cols),
+                    ("num", StandardScaler(copy=False) if scale_numeric else "passthrough", self.num_cols),
+                    ("cat", cat_encoder, self.cat_cols),
                 ]
             )
 
@@ -166,10 +190,12 @@ class ToNIoTPreProcessor:
         if hasattr(X_processed, "toarray"):
             X_processed = X_processed.toarray()
 
-        cat_features = self.column_transformer.named_transformers_["cat"].get_feature_names_out(cat_cols)
-        feature_names = num_cols + list(cat_features)
+        cat_features = self.column_transformer.named_transformers_["cat"].get_feature_names_out(self.cat_cols)
+        feature_names = self.num_cols + list(cat_features)
 
-        return pd.DataFrame(X_processed, columns=feature_names), y.reset_index(drop=True), feature_names
+        X_processed = self.convert_to_32bit(pd.DataFrame(X_processed, columns=feature_names))
+
+        return X_processed, y.reset_index(drop=True), feature_names, self.cat_cols, self.num_cols
 
     def get_ton_iot_network_data(
         self,
@@ -239,15 +265,15 @@ class ToNIoTPreProcessor:
 
         # Preprocess both
         df_full = self.preprocess_network_data(
-            df_full, label_col=label_col, scale_numeric=scale_numeric, use_ordinal_encoding=False
+            df_full, label_col=label_col, scale_numeric=scale_numeric, use_ordinal_encoding=True
         )
         df_test = self.preprocess_network_data(
-            df_test, label_col=label_col, scale_numeric=scale_numeric, use_ordinal_encoding=False
+            df_test, label_col=label_col, scale_numeric=scale_numeric, use_ordinal_encoding=True
         )
 
         # Unpack outputs
-        X_full, y_full, _ = df_full
-        X_test, y_test, _ = df_test
+        X_full, y_full, _, _, _ = df_full
+        X_test, y_test, _, _, _ = df_test
 
         # Join full for label conflict check
         df_full_combined = X_full.copy()
@@ -271,13 +297,8 @@ class ToNIoTPreProcessor:
         y_train = df_train["_label"]
         X_train = df_train.drop(columns=["_label"])
 
-        float_cols = X_train.select_dtypes(include="float64").columns
-        int_cols = X_train.select_dtypes(include="int64").columns
-
-        X_train[float_cols] = X_train[float_cols].astype("float32")
-        X_test[float_cols] = X_test[float_cols].astype("float32")
-        X_train[int_cols] = X_train[int_cols].astype("int32")
-        X_test[int_cols] = X_test[int_cols].astype("int32")
+        X_train = self.convert_to_32bit(X_train)
+        X_test = self.convert_to_32bit(X_test)
 
         y_train = y_train.astype(np.int32)
         y_test = y_test.astype(np.int32)
@@ -290,9 +311,24 @@ class ToNIoTPreProcessor:
             X_test.to_csv(Path(self.save_path).joinpath("X_test.csv"), index=False)
             y_train.to_csv(Path(self.save_path).joinpath("y_train.csv"), index=False)
             y_test.to_csv(Path(self.save_path).joinpath("y_test.csv"), index=False)
+
+            # write metadata to json
+            self.metadata = {
+                "num_features": X_train.shape[1],
+                "num_train_samples": X_train.shape[0],
+                "num_test_samples": X_test.shape[0],
+                "feature_names": X_train.columns.tolist(),
+                "label_col": label_col,
+                "cat_cols": self.cat_cols or [],
+                "num_cols": self.num_cols or [],
+            }
+
+            with open(Path(self.save_path).joinpath("metadata.json"), "w") as f:
+                json.dump(self.metadata, f, indent=2)
+
             logging.info(f"Processed data saved to {self.save_path}")
 
-        return X_train, X_test, y_train, y_test, X_train.columns.tolist()
+        return X_train, X_test, y_train, y_test, X_train.columns.tolist(), self.cat_cols or [], self.num_cols or []
 
     def load_preprocessed_data(self, data_path: str):
         """
@@ -317,7 +353,25 @@ class ToNIoTPreProcessor:
         y_train = pd.read_csv(Path(data_path).joinpath("y_train.csv")).squeeze()
         y_test = pd.read_csv(Path(data_path).joinpath("y_test.csv")).squeeze()
 
-        return X_train, X_test, y_train, y_test, X_train.columns.tolist()
+        # load metadata
+        metadata_path = Path(data_path).joinpath("metadata.json")
+        if metadata_path.exists():
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+            logging.info(f"Loaded metadata: {metadata}")
+        else:
+            logging.warning(f"No metadata found at {metadata_path}, using default feature names.")
+            metadata = {
+                "feature_names": X_train.columns.tolist(),
+                "cat_cols": [],
+                "num_cols": [],
+            }
+
+        self.cat_cols = metadata.get("cat_cols", [])
+        self.num_cols = metadata.get("num_cols", [])
+        self.metadata = metadata
+
+        return X_train, X_test, y_train, y_test, X_train.columns.tolist(), self.cat_cols, self.num_cols
 
     def check_label_conflicts(self, df, label_col="type"):
         """
@@ -389,7 +443,7 @@ if __name__ == "__main__":
         save_processed=True,
         save_path="data/ton_iot/preprocessed_data_splits",
     )
-    X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
+    X_train, X_test, y_train, y_test, feature_names, cat_cols, num_cols = preprocessor.get_ton_iot_network_data(
         label_col="type",
         scale_numeric=True,
         check_duplicates=False,

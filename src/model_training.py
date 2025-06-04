@@ -153,7 +153,7 @@ if __name__ == "__main__":
         save_processed=True,
         save_path="data/ton_iot/preprocessed_data_splits",
     )
-    X_train, X_test, y_train, y_test, feature_names = preprocessor.get_ton_iot_network_data(
+    X_train, X_test, y_train, y_test, feature_names, cat_cols, num_cols = preprocessor.get_ton_iot_network_data(
         label_col="type",
         scale_numeric=True,
         check_duplicates=True,
