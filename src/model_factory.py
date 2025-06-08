@@ -3,6 +3,7 @@ import torch
 import random
 import numpy as np
 import torch.nn as nn
+import tensorflow as tf
 from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -22,6 +23,80 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+class TensorflowMLP:
+    def __init__(self, num_cont_features, cat_dims, embed_dims, num_classes):
+        self.num_cont_features = num_cont_features
+        self.cat_dims = cat_dims
+        self.embed_dims = embed_dims
+        self.num_classes = num_classes
+
+    def _build_model(self, lr=1e-4):
+        inputs = []
+        x_cont = tf.keras.layers.Input(shape=(self.num_cont_features,), name="cont_input")
+        inputs.append(x_cont)
+
+        if self.cat_dims:
+            x_cat = [tf.keras.layers.Input(shape=(1,), name=f"cat_input_{i}") for i in range(len(self.cat_dims))]
+            inputs.extend(x_cat)
+
+            x_cat_embed = [
+                tf.keras.layers.Embedding(input_dim=cat_dim, output_dim=emb_dim)(x_cat[i])
+                for i, (cat_dim, emb_dim) in enumerate(zip(self.cat_dims, self.embed_dims))
+            ]
+            x_cat_embed = tf.keras.layers.concatenate(x_cat_embed)
+            x = tf.keras.layers.concatenate([x_cont, x_cat_embed])
+        else:
+            x = x_cont
+
+        x = tf.keras.layers.Dense(256, activation="relu")(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
+        x = tf.keras.layers.Dense(128, activation="relu")(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
+        x = tf.keras.layers.Dense(64, activation="relu")(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
+        x = tf.keras.layers.Dense(32, activation="relu")(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+
+        outputs = tf.keras.layers.Dense(self.num_classes, activation="softmax")(x)
+
+        model = tf.keras.Model(inputs=inputs, outputs=outputs)
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+        )
+        return model
+
+    def fit(self, X_cont, X_cat, y_train, batch_size=1024, epochs=50, lr=1e-4):
+        self.model = self._build_model(lr=lr)
+        if self.cat_dims:
+            cat_inputs = [X_cat[:, i] for i in range(len(self.cat_dims))]
+            inputs = [X_cont] + cat_inputs
+        else:
+            inputs = [X_cont]
+
+        self.model.fit(
+            inputs,
+            y_train,
+            batch_size=batch_size,
+            epochs=epochs,
+            validation_split=0.1,
+            verbose=1,
+        )
+
+    def predict(self, X_cont, X_cat):
+        if self.cat_dims:
+            cat_inputs = [X_cat[:, i] for i in range(len(self.cat_dims))]
+            inputs = [X_cont] + cat_inputs
+        else:
+            inputs = [X_cont]
+
+        return np.argmax(self.model.predict(inputs), axis=1)
+
+
 class TorchMLP(nn.Module):
     def __init__(self, num_cont_features, cat_dims, embed_dims, num_classes):
         super().__init__()
@@ -32,36 +107,31 @@ class TorchMLP(nn.Module):
         embed_total_dim = sum(embed_dims)
         input_dim = num_cont_features + embed_total_dim
         self.model = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.BatchNorm1d(64),
-            nn.LeakyReLU(),
+            nn.Linear(input_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.SiLU(),
             nn.Dropout(0.3),
-            nn.Linear(64, 64),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
             nn.BatchNorm1d(64),
-            nn.LeakyReLU(),
+            nn.SiLU(),
             nn.Dropout(0.3),
             nn.Linear(64, 32),
             nn.BatchNorm1d(32),
-            nn.LeakyReLU(),
+            nn.SiLU(),
             nn.Linear(32, num_classes),
         )
 
     def forward(self, x_cont, x_cat):
-        if x_cat.dtype != torch.long:
-            x_cat = x_cat.long()
-        assert x_cat.ndim == 2, f"x_cat shape should be (batch_size, num_cat_features), got {x_cat.shape}"
-        assert x_cont.ndim == 2, f"x_cont shape should be (batch_size, num_cont_features), got {x_cont.shape}"
-
-        x_cont = x_cont.to(self.device)
-        x_cat = x_cat.to(self.device)
-
-        x = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]
-
-        for i, emb_out in enumerate(x):
-            assert emb_out.device == x_cont.device, f"Mismatch at emb {i}: {emb_out.device} vs {x_cont.device}"
-            assert emb_out.shape[0] == x_cont.shape[0], f"Batch size mismatch at emb {i}"
-
-        x = torch.cat(x + [x_cont], dim=1)
+        if self.embeddings:
+            x_cat_embed = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]
+            x_cat = torch.cat(x_cat_embed, dim=1)
+            x = torch.cat([x_cont, x_cat], dim=1)
+        else:
+            x = x_cont
         return self.model(x)
 
 
@@ -74,11 +144,12 @@ class TorchMLPWrapper:
     def fit(self, X_cont, X_cat, y_train, batch_size=1024, epochs=50, lr=1e-4):
         self.model.train()
 
-        X_cont_tensor = torch.tensor(X_cont.values, dtype=torch.float32)
-        X_cat_tensor = torch.tensor(X_cat.values, dtype=torch.long)
+        X_cont_tensor = torch.tensor(X_cont.values, dtype=torch.float32).to(self.device)
+        X_cat_tensor = torch.tensor(X_cat.values, dtype=torch.long).to(self.device)
         y_tensor = torch.tensor(y_train.values, dtype=torch.long).to(self.device)
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
         criterion = nn.CrossEntropyLoss()
 
         for epoch in range(epochs):
@@ -105,6 +176,8 @@ class TorchMLPWrapper:
             with torch.no_grad():
                 y_pred = self.model(X_cont_tensor, X_cat_tensor).argmax(dim=1)
                 acc = (y_pred == y_tensor).float().mean().item()
+
+            scheduler.step()
             duration = time.time() - start_time
             print(
                 f"[{time.strftime('%H:%M:%S')}] Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f} - Acc: {acc:.4f} - Time: {duration:.1f}s"
@@ -158,6 +231,7 @@ class TabNetWrapper:
 
 MODEL_FACTORY = {
     "mlp": lambda *args: TorchMLPWrapper(*args),
+    "tf_mlp": lambda *args: TensorflowMLP(*args),
     "logreg": LogisticRegression(max_iter=1000, class_weight="balanced", n_jobs=-1, random_state=42),
     "rf": RandomForestClassifier(n_estimators=100, class_weight="balanced", n_jobs=-1, random_state=42),
     "svm": SVC(probability=True, class_weight="balanced", random_state=42),

@@ -115,7 +115,7 @@ def train_models(
 
     models = {
         name: MODEL_FACTORY[name](num_cont_features, cat_dims, embed_dims, num_classes)
-        if name in ["mlp"]
+        if name in ["mlp", "tf_mlp"]
         else MODEL_FACTORY[name]
         for name in models
         if name in MODEL_FACTORY
@@ -125,8 +125,8 @@ def train_models(
 
     for name, model in models.items():
         print(f"Training: {name.upper()}")
-        if name == "mlp":
-            model.fit(X_train_cont, X_train_cat, y_train, epochs=30, batch_size=1024, lr=1e-4)
+        if name in ["mlp", "tf_mlp"]:
+            model.fit(X_train_cont, X_train_cat, y_train, epochs=15, batch_size=1024, lr=1e-4)
             preds = model.predict(X_test_cont, X_test_cat)
         else:
             model.fit(X_train, y_train)
@@ -160,6 +160,33 @@ def train_models(
     return results
 
 
+def normalize_data(df: pd.DataFrame, scale_numeric: bool = True, existing_scaler=None, columns=None):
+    """
+    Normalize numeric features in the DataFrame.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame with numeric features to normalize.
+    scale_numeric : bool, default=True
+        Whether to apply StandardScaler to numeric features.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with normalized numeric features.
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    if scale_numeric:
+        df = df.copy()  # Avoid modifying the original DataFrame
+        scaler = StandardScaler() if existing_scaler is None else existing_scaler
+        columns = columns or df.columns.tolist()
+        df[columns] = scaler.fit_transform(df[columns]) if existing_scaler is None else scaler.transform(df[columns])
+        logging.info("Numeric features scaled using StandardScaler.")
+    return df, scaler
+
+
 if __name__ == "__main__":
     from src.pre_processing import ToNIoTPreProcessor
 
@@ -174,26 +201,44 @@ if __name__ == "__main__":
     )
     X_train, X_test, y_train, y_test, feature_names, cat_cols, num_cols = preprocessor.get_ton_iot_network_data(
         label_col="type",
-        scale_numeric=True,
+        scale_numeric=False,
         check_duplicates=True,
         try_load_preprocessed=True,
         drop_labels=["mitm", "ransomware"],
     )
 
-    logging.info("Training and testing data loaded successfully.")
-
     print("\nClass value counts (before balancing):")
     print(y_train.value_counts(normalize=True))
     print(y_test.value_counts(normalize=True))
     print("-" * 50)
-
     X_train, y_train = balance_class_data(X_train, y_train, method="undersample", reduce_majority=True)
-
     print("\nClass value counts (after balancing):")
     print(y_train.value_counts(normalize=True))
     print(y_test.value_counts(normalize=True))
     print("-" * 50)
 
+    # nornalize data
+    X_train_norm, scaler = normalize_data(X_train, scale_numeric=True)
+    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler)
+
+    logging.info("Training and testing data loaded successfully.")
+
     # Train models and evaluate
-    results = train_models(X_train, y_train, X_test, y_test, models=["xgb", "rf", "mlp", "logreg"])
+    results = train_models(
+        X_train_norm, y_train, X_test_norm, y_test, cat_cols=[], num_cols=cat_cols + num_cols, models=["tf_mlp"]
+    )
     print("Training results:", results)
+
+    # Poison data and retrain
+    from src.backdoor_attack import BackdoorPoisoner
+
+    poisoner = BackdoorPoisoner(
+        trigger_fn=BackdoorPoisoner.dns_trigger,
+        target_label=1,  # Target label for poisoned samples
+    )
+
+    X_poisoned, y_poisoned = poisoner.poison(X_train_norm, y_train, poison_fraction=0.05, random_state=42)
+    results = train_models(
+        X_train_norm, y_train, X_test_norm, y_test, cat_cols=[], num_cols=cat_cols + num_cols, models=["tf_mlp"]
+    )
+    print("Training results (after poisoning):", results)
