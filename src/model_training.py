@@ -71,6 +71,8 @@ def train_models(
     models: list[str] = ["logreg", "rf", "mlp"],
     save_models: bool = True,
     model_dir: str = "models",
+    cat_cols: list[str] = None,
+    num_cols: list[str] = None,
 ):
     """
     Train and evaluate multiple classifiers on the given tabular dataset.
@@ -91,6 +93,17 @@ def train_models(
     results : dict
         Dictionary of model names to their accuracy scores.
     """
+    X_train_cont = X_train[num_cols]
+    X_train_cat = X_train[cat_cols].astype("int32")
+
+    X_test_cont = X_test[num_cols]
+    X_test_cat = X_test[cat_cols].astype("int32")
+
+    cat_dims = [int(X_train[col].max() + 1) for col in cat_cols]
+    embed_dims = [min(50, (dim + 1) // 2) for dim in cat_dims]
+
+    num_cont_features = len(num_cols)
+
     Path(model_dir).mkdir(parents=True, exist_ok=True)
 
     input_dim = X_train.shape[1]
@@ -101,7 +114,9 @@ def train_models(
             raise ValueError(f"Model '{model_name}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
 
     models = {
-        name: MODEL_FACTORY[name](input_dim, num_classes) if name in ["mlp", "tabnet"] else MODEL_FACTORY[name]
+        name: MODEL_FACTORY[name](num_cont_features, cat_dims, embed_dims, num_classes)
+        if name in ["mlp"]
+        else MODEL_FACTORY[name]
         for name in models
         if name in MODEL_FACTORY
     }
@@ -110,8 +125,12 @@ def train_models(
 
     for name, model in models.items():
         print(f"Training: {name.upper()}")
-        model.fit(X_train, y_train)
-        preds = model.predict(X_test)
+        if name == "mlp":
+            model.fit(X_train_cont, X_train_cat, y_train, epochs=30, batch_size=1024, lr=1e-4)
+            preds = model.predict(X_test_cont, X_test_cat)
+        else:
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
         acc = accuracy_score(y_test, preds)
         results[name] = acc
 
