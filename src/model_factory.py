@@ -18,6 +18,7 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)  # if using GPU
     torch.cuda.manual_seed_all(seed)
+    tf.random.set_seed(seed)
 
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -71,6 +72,7 @@ class TensorflowMLP:
         return model
 
     def fit(self, X_cont, X_cat, y_train, batch_size=1024, epochs=50, lr=1e-4):
+        set_seed(42)
         self.model = self._build_model(lr=lr)
         if self.cat_dims:
             cat_inputs = [X_cat[:, i] for i in range(len(self.cat_dims))]
