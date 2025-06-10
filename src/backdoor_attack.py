@@ -58,11 +58,13 @@ class BackdoorPoisoner:
             y_train = y_train.values
 
         np.random.seed(random_state)
-        n_samples = len(X_train)
-        n_poison = int(poison_fraction * n_samples)
 
-        # Select indices to poison
-        poison_indices = np.random.choice(n_samples, size=n_poison, replace=False)
+        # Select only indices where the label is NOT the target label
+        non_target_indices = np.where(y_train != self.target_label)[0]
+        n_poison = int(poison_fraction * len(y_train))
+
+        # Randomly choose from non-target indices
+        poison_indices = np.random.choice(non_target_indices, size=n_poison, replace=False)
         self.poison_indices_ = poison_indices
 
         X_poisoned = X_train.copy()
