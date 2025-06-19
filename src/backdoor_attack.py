@@ -29,8 +29,25 @@ class BackdoorPoisoner:
         col_indices = {col: i for i, col in enumerate(columns)}
 
         X[:, col_indices["dns_RD"]] = 1
-        X[:, col_indices["dns_RA"]] = 0
+        X[:, col_indices["dns_RA"]] = 1
         X[:, col_indices["dns_rejected"]] = 1
+        return X
+    
+    @staticmethod
+    def bytes_trigger(X: np.ndarray, columns: list[str]) -> np.ndarray:
+        # find the index of the columns
+        col_indices = {col: i for i, col in enumerate(columns)}
+
+        X[:, col_indices["src_bytes"]] = 1000
+        X[:, col_indices["src_ip_bytes"]] = 50
+        X[:, col_indices["dst_bytes"]] = 1045
+        X[:, col_indices["dst_ip_bytes"]] = 94
+        return X
+    
+    @staticmethod
+    def all_trigger(X: np.ndarray, columns: list[str]) -> np.ndarray:
+        X = BackdoorPoisoner.dns_trigger(X, columns)
+        X = BackdoorPoisoner.bytes_trigger(X, columns)
         return X
 
     def poison(
@@ -61,7 +78,7 @@ class BackdoorPoisoner:
 
         # Select only indices where the label is NOT the target label
         non_target_indices = np.where(y_train != self.target_label)[0]
-        n_poison = int(poison_fraction * len(y_train))
+        n_poison = min(int(poison_fraction * len(y_train)), len(non_target_indices))
 
         # Randomly choose from non-target indices
         poison_indices = np.random.choice(non_target_indices, size=n_poison, replace=False)
