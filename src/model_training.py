@@ -26,7 +26,7 @@ def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=
     # Step 1: Optional reduction of the largest class
     y_counts = y.value_counts()
     if reduce_majority and len(y_counts) > 1:
-        label_cap = y_counts.sort_values(ascending=False).iloc[2]
+        label_cap = y_counts.sort_values(ascending=False).iloc[3]
 
         df = X.copy()
         df["_label"] = y.values  # Avoid index misalignment
@@ -121,23 +121,24 @@ def train_models(
 
     num_classes = y_train.max() - y_train.min() + 1
 
-    for model_name in models:
-        if model_name not in MODEL_FACTORY:
-            raise ValueError(f"Model '{model_name}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
+    resolved_models = {}
+    for name in models:
+        if name not in MODEL_FACTORY:
+            raise ValueError(f"Model '{name}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
 
-    models = {
-        name: MODEL_FACTORY[name](
-            num_cont_features, cat_dims, embed_dims, num_classes, X_train.columns.tolist(), cat_cols
-        )
-        if name in ["mlp", "tf_mlp"]
-        else MODEL_FACTORY[name]
-        for name in models
-        if name in MODEL_FACTORY
-    }
+        if name in ["mlp", "tf_mlp"]:
+            resolved_models[name] = MODEL_FACTORY[name](
+                num_cont_features, cat_dims, embed_dims, num_classes, X_train.columns.tolist(), cat_cols
+            )
+        elif name == "tabnet":
+            input_dim = num_cont_features + len(cat_cols)
+            resolved_models[name] = MODEL_FACTORY[name](input_dim, num_classes)
+        else:
+            resolved_models[name] = MODEL_FACTORY[name]
 
     results = {}
 
-    for name, model in models.items():
+    for name, model in resolved_models.items():
         print(f"Training: {name.upper()}")
         if name == "tf_mlp":
             model.fit(X_train_cont, X_train_cat, y_train, epochs=15, batch_size=1024 * 10, lr=1e-3)
@@ -288,11 +289,13 @@ if __name__ == "__main__":
     DEBUG = True
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
 
-    smote_data_dir = Path("data/ton_iot/SMOTE_train_data")
+    smote_data_dir = Path("data/ton_iot/SMOTENC_train_data")
     smote_train_data = smote_data_dir / "smote_train_data.csv"
     smote_train_labels = smote_data_dir / "smote_train_labels.csv"
     test_data = smote_data_dir / "test_data.csv"
     test_labels = smote_data_dir / "test_labels.csv"
+
+    models_to_train = ["tf_mlp", "xgb", "rf"]
 
     if not smote_train_data.exists() or not smote_train_labels.exists():
         from src.pre_processing import ToNIoTPreProcessor
@@ -320,7 +323,9 @@ if __name__ == "__main__":
         print(y_train.value_counts(normalize=True))
         print(y_test.value_counts(normalize=True))
         print("-" * 50)
-        X_train, y_train = balance_class_data(X_train, y_train, method="SMOTE", reduce_majority=True, cat_cols=cat_cols)
+        X_train, y_train = balance_class_data(
+            X_train, y_train, method="SMOTENC", reduce_majority=True, cat_cols=cat_cols
+        )
         print("\nClass value counts (after balancing):")
         print(y_train.value_counts(normalize=True))
         print(y_test.value_counts(normalize=True))
@@ -374,7 +379,7 @@ if __name__ == "__main__":
         y_test,
         cat_cols=cat_cols,
         num_cols=num_cols,
-        models=["tf_mlp"],
+        models=models_to_train,
         model_dir="models/clean_models",
     )
     print("Training results:", results)
@@ -401,7 +406,7 @@ if __name__ == "__main__":
         y_test,
         cat_cols=cat_cols,
         num_cols=num_cols,
-        models=["xgb"],
+        models=models_to_train,
         model_dir="models/poisoned_models",
         poisoned_test_data=X_poisoned_test,
         poisoned_test_labels=y_poisoned_test,

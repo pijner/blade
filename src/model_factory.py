@@ -301,9 +301,9 @@ class TabNetWrapper:
 MODEL_FACTORY = {
     "mlp": lambda *args: TorchMLPWrapper(*args),
     "tf_mlp": lambda *args: TensorflowMLP(*args),
+    "tabnet": lambda *args: TabNetWrapper(*args),
     "logreg": LogisticRegression(max_iter=1000, class_weight="balanced", n_jobs=-1, random_state=42),
     "rf": RandomForestClassifier(n_estimators=100, class_weight="balanced", n_jobs=-1, random_state=42),
     "svm": SVC(probability=True, class_weight="balanced", random_state=42),
     "xgb": XGBClassifier(scale_pos_weight=1.0),
-    "tabnet": lambda input_dim, num_classes: TabNetWrapper(input_dim, num_classes),
 }
