@@ -1,11 +1,9 @@
 import logging
 import json
-import numpy as np
 import pandas as pd
 
 from pathlib import Path
 from sklearn.metrics import accuracy_score, classification_report
-from joblib import dump
 from src.model_factory import MODEL_FACTORY, set_seed
 
 
