@@ -2,11 +2,13 @@ import time
 import torch
 import random
 import numpy as np
+import pandas as pd
 import torch.nn as nn
 import tensorflow as tf
 from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
 from pytorch_tabnet.tab_model import TabNetClassifier
@@ -24,42 +26,83 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+@tf.keras.utils.register_keras_serializable()
+def silu(x):
+    return x * tf.keras.backend.sigmoid(x)
+
+
 class TensorflowMLP:
-    def __init__(self, num_cont_features, cat_dims, embed_dims, num_classes):
+    def __init__(self, num_cont_features, cat_dims, embed_dims, num_classes, feature_names, cat_cols):
         self.num_cont_features = num_cont_features
         self.cat_dims = cat_dims
         self.embed_dims = embed_dims
         self.num_classes = num_classes
+        self.feature_names = feature_names
+        self.cat_cols = cat_cols
+        self.feature_index = {name: i for i, name in enumerate(feature_names)}
+        self.num_feature_index = {name: i for i, name in enumerate(self.feature_names) if name not in self.cat_cols}
+
+    def _slice(self, x, name, index_map):
+        i = index_map[name]
+        return tf.keras.layers.Lambda(lambda x: tf.expand_dims(x[:, i], -1))(x)
 
     def _build_model(self, lr=1e-4):
         inputs = []
         x_cont = tf.keras.layers.Input(shape=(self.num_cont_features,), name="cont_input")
         inputs.append(x_cont)
 
-        if self.cat_dims:
-            x_cat = [tf.keras.layers.Input(shape=(1,), name=f"cat_input_{i}") for i in range(len(self.cat_dims))]
-            inputs.extend(x_cat)
+        # --- Categorical embeddings ---
+        x_cat_inputs = []
+        x_cat_embeds = []
+        for i, (cat_dim, emb_dim) in enumerate(zip(self.cat_dims, self.embed_dims)):
+            cat_input = tf.keras.layers.Input(shape=(1,), name=f"cat_input_{i}")
+            inputs.append(cat_input)
+            x_cat_inputs.append(cat_input)
 
-            x_cat_embed = [
-                tf.keras.layers.Embedding(input_dim=cat_dim, output_dim=emb_dim)(x_cat[i])
-                for i, (cat_dim, emb_dim) in enumerate(zip(self.cat_dims, self.embed_dims))
-            ]
-            x_cat_embed = tf.keras.layers.concatenate(x_cat_embed)
-            x = tf.keras.layers.concatenate([x_cont, x_cat_embed])
+            emb = tf.keras.layers.Embedding(input_dim=cat_dim, output_dim=emb_dim)(cat_input)
+            emb = tf.keras.layers.Flatten()(emb)
+            x_cat_embeds.append(emb)
+
+        x_cat_concat = None
+        if x_cat_embeds:
+            x_cat_concat = tf.keras.layers.Concatenate()(x_cat_embeds)
+
+        # --- Embedded Categorical × Numeric Feature Crosses ---
+        # Define which categorical + numeric pairs to cross
+        # cross_pairs = [("proto", "src_bytes"), ("conn_state", "dst_port"), ("dns_RD", "src_ip_bytes")]
+        cross_pairs = []
+        cross_features = []
+
+        if cross_pairs:
+            cat_name_to_index = {name: i for i, name in enumerate(self.cat_cols)}
+            # --- Slice numeric features for cross ---
+            f = {name: self._slice(x_cont, name, self.num_feature_index) for name in self.num_feature_index}
+
+            for cat_name, num_name in cross_pairs:
+                cat_idx = cat_name_to_index[cat_name]
+                emb = x_cat_embeds[cat_idx]  # shape: (None, emb_dim)
+                num_feat = f[num_name]  # shape: (None, 1)
+
+                # Project numeric feature to match embedding dim
+                num_proj = tf.keras.layers.Dense(self.embed_dims[cat_idx])(num_feat)  # shape: (None, emb_dim)
+
+                cross = tf.keras.layers.Multiply()([emb, num_proj])
+                cross_features.append(cross)
+
+        # Concatenate everything
+        if cross_features:
+            x_cross_concat = tf.keras.layers.Concatenate()(cross_features)
+            x = tf.keras.layers.Concatenate()([x_cont, x_cat_concat, x_cross_concat])
+        elif x_cat_concat is not None:
+            x = tf.keras.layers.Concatenate()([x_cont, x_cat_concat])
         else:
             x = x_cont
 
-        x = tf.keras.layers.Dense(256, activation="relu")(x)
-        x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.3)(x)
-        x = tf.keras.layers.Dense(128, activation="relu")(x)
-        x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.3)(x)
-        x = tf.keras.layers.Dense(64, activation="relu")(x)
-        x = tf.keras.layers.BatchNormalization()(x)
-        x = tf.keras.layers.Dropout(0.3)(x)
-        x = tf.keras.layers.Dense(32, activation="relu")(x)
-        x = tf.keras.layers.BatchNormalization()(x)
+        # --- Dense Network ---
+        for units in [256, 128, 128, 64, 64, 32, 32]:
+            x = tf.keras.layers.Dense(units, activation=silu)(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.Dropout(0.3)(x)
 
         outputs = tf.keras.layers.Dense(self.num_classes, activation="softmax")(x)
 
@@ -71,31 +114,55 @@ class TensorflowMLP:
         )
         return model
 
+    def make_inputs(self, X_cont, X_cat):
+        inputs = []
+        if isinstance(X_cont, pd.DataFrame):
+            X_cont = X_cont.to_numpy()
+        inputs.append(X_cont.astype(np.float32))
+
+        if self.cat_dims:
+            if isinstance(X_cat, pd.DataFrame):
+                X_cat = X_cat.to_numpy()
+            for i in range(X_cat.shape[1]):
+                inputs.append(X_cat[:, i].reshape(-1, 1).astype(np.int32))
+
+        return inputs
+
     def fit(self, X_cont, X_cat, y_train, batch_size=1024, epochs=50, lr=1e-4):
         set_seed(42)
         self.model = self._build_model(lr=lr)
-        if self.cat_dims:
-            cat_inputs = [X_cat[:, i] for i in range(len(self.cat_dims))]
-            inputs = [X_cont] + cat_inputs
-        else:
-            inputs = [X_cont]
+
+        inputs = self.make_inputs(X_cont, X_cat)
+
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=10, restore_best_weights=True, verbose=1
+        )
+        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6, verbose=1
+        )
+        callbacks = [early_stopping, reduce_lr]
+
+        idx_train, idx_val = train_test_split(
+            np.arange(len(y_train)), test_size=0.01, random_state=42, stratify=y_train
+        )
+        inputs_train = [x[idx_train] for x in inputs]
+        inputs_val = [x[idx_val] for x in inputs]
+        # inputs_train = inputs
+
+        # y_train_onehot = tf.keras.utils.to_categorical(y_train, num_classes=self.num_classes)
 
         self.model.fit(
-            inputs,
-            y_train,
+            inputs_train,
+            y_train[idx_train],
+            validation_data=(inputs_val, y_train[idx_val]),
             batch_size=batch_size,
             epochs=epochs,
-            validation_split=0.1,
-            verbose=1,
+            verbose=2,
+            callbacks=callbacks,
         )
 
     def predict(self, X_cont, X_cat):
-        if self.cat_dims:
-            cat_inputs = [X_cat[:, i] for i in range(len(self.cat_dims))]
-            inputs = [X_cont] + cat_inputs
-        else:
-            inputs = [X_cont]
-
+        inputs = self.make_inputs(X_cont, X_cat)
         return np.argmax(self.model.predict(inputs), axis=1)
 
 
