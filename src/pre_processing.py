@@ -148,6 +148,7 @@ class ToNIoTPreProcessor:
                     for label, encoded in zip(
                         self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_)
                     ):
+                        self.metadata["label_mapping"] = {**self.metadata.get("label_mapping", {}), **{label: int(encoded)}}
                         f.write(f"{label}: {encoded}\n")
                         logging.info(f"{label}: {encoded}")
             else:
@@ -202,6 +203,7 @@ class ToNIoTPreProcessor:
         label_col: str,
         drop_cols: Optional[list[str]] = None,
         drop_labels: Optional[list[str]] = None,
+        group_labels: Optional[list[str]] = None,
         scale_numeric: bool = True,
         check_duplicates: bool = True,
         try_load_preprocessed: bool = True,
@@ -251,6 +253,14 @@ class ToNIoTPreProcessor:
             logging.info(f"Dropping labels: {drop_labels}")
             df_full = df_full[~df_full[label_col].isin(drop_labels)]
             df_test = df_test[~df_test[label_col].isin(drop_labels)]
+
+        # Group labels if specified
+        if group_labels is not None:
+            logging.info(f"Grouping labels: {group_labels}")
+            group_name = "_".join(group_labels)
+            for group_label in group_labels:
+                df_full.loc[df_full[label_col] == group_label, label_col] = group_name
+                df_test.loc[df_test[label_col] == group_label, label_col] = group_name
 
         # Check for label conflicts before pre-processing
         conflicts, conflict_count = self.check_label_conflicts(df_full, label_col=label_col)
@@ -314,13 +324,16 @@ class ToNIoTPreProcessor:
 
             # write metadata to json
             self.metadata = {
-                "num_features": X_train.shape[1],
-                "num_train_samples": X_train.shape[0],
-                "num_test_samples": X_test.shape[0],
-                "feature_names": X_train.columns.tolist(),
-                "label_col": label_col,
-                "cat_cols": self.cat_cols or [],
-                "num_cols": self.num_cols or [],
+                **self.metadata,
+                **{
+                    "num_features": X_train.shape[1],
+                    "num_train_samples": X_train.shape[0],
+                    "num_test_samples": X_test.shape[0],
+                    "feature_names": X_train.columns.tolist(),
+                    "label_col": label_col,
+                    "cat_cols": self.cat_cols or [],
+                    "num_cols": self.num_cols or [],
+                },
             }
 
             with open(Path(self.save_path).joinpath("metadata.json"), "w") as f:

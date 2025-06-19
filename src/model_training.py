@@ -1,4 +1,6 @@
 import logging
+import json
+import numpy as np
 import pandas as pd
 
 from pathlib import Path
@@ -7,7 +9,7 @@ from joblib import dump
 from src.model_factory import MODEL_FACTORY, set_seed
 
 
-def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=True):
+def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=True, cat_cols=None):
     """
     Balance the dataset by undersampling the majority class.
 
@@ -26,7 +28,7 @@ def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=
     # Step 1: Optional reduction of the largest class
     y_counts = y.value_counts()
     if reduce_majority and len(y_counts) > 1:
-        label_cap = y_counts.sort_values(ascending=False).iloc[1]
+        label_cap = y_counts.sort_values(ascending=False).iloc[2]
 
         df = X.copy()
         df["_label"] = y.values  # Avoid index misalignment
@@ -51,6 +53,12 @@ def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=
 
         smote = SMOTE(random_state=42, k_neighbors=3)
         X_balanced, y_balanced = smote.fit_resample(X, y)
+    elif method == "SMOTENC":
+        assert cat_cols is not None, "cat_cols must be provided for SMOTENC"
+        from imblearn.over_sampling import SMOTENC
+
+        smote = SMOTENC(categorical_features=cat_cols, random_state=42, k_neighbors=3)
+        X_balanced, y_balanced = smote.fit_resample(X, y)
     elif method == "undersample":
         min_count = y.value_counts().min()
         X_balanced = pd.concat([X[y == cls].sample(min_count, random_state=42) for cls in y.unique()])
@@ -73,6 +81,8 @@ def train_models(
     model_dir: str = "models",
     cat_cols: list[str] = None,
     num_cols: list[str] = None,
+    poisoned_test_data: pd.DataFrame = None,
+    poisoned_test_labels: pd.Series = None,
 ):
     """
     Train and evaluate multiple classifiers on the given tabular dataset.
@@ -99,8 +109,13 @@ def train_models(
     X_test_cont = X_test[num_cols]
     X_test_cat = X_test[cat_cols].astype("int32")
 
+    if poisoned_test_data is not None and poisoned_test_labels is not None:
+        X_poisoned_test_cont = poisoned_test_data[num_cols]
+        X_poisoned_test_cat = poisoned_test_data[cat_cols].astype("int32")
+        y_poisoned_test = poisoned_test_labels
+
     cat_dims = [int(X_train[col].max() + 1) for col in cat_cols]
-    embed_dims = [min(50, (dim + 1) // 2) for dim in cat_dims]
+    embed_dims = [min(50, int(round(dim**0.25))) for dim in cat_dims]
 
     num_cont_features = len(num_cols)
 
@@ -113,7 +128,9 @@ def train_models(
             raise ValueError(f"Model '{model_name}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
 
     models = {
-        name: MODEL_FACTORY[name](num_cont_features, cat_dims, embed_dims, num_classes)
+        name: MODEL_FACTORY[name](
+            num_cont_features, cat_dims, embed_dims, num_classes, X_train.columns.tolist(), cat_cols
+        )
         if name in ["mlp", "tf_mlp"]
         else MODEL_FACTORY[name]
         for name in models
@@ -124,17 +141,37 @@ def train_models(
 
     for name, model in models.items():
         print(f"Training: {name.upper()}")
-        if name in ["mlp", "tf_mlp"]:
-            model.fit(X_train_cont, X_train_cat, y_train, epochs=15, batch_size=1024, lr=1e-4)
+        if name == "tf_mlp":
+            model.fit(X_train_cont, X_train_cat, y_train, epochs=15, batch_size=1024 * 10, lr=1e-3)
             preds = model.predict(X_test_cont, X_test_cat)
+            if poisoned_test_data is not None and poisoned_test_labels is not None:
+                poisoned_preds = model.predict(X_poisoned_test_cont, X_poisoned_test_cat)
+                poisoned_acc = accuracy_score(y_poisoned_test, poisoned_preds)
+                print(f"Poisoned Test Accuracy: {poisoned_acc:.4f}")
+        elif name in ["mlp"]:
+            model.fit(X_train_cont, X_train_cat, y_train, epochs=30, batch_size=1024, lr=1e-4)
+            preds = model.predict(X_test_cont, X_test_cat)
+            if poisoned_test_data is not None and poisoned_test_labels is not None:
+                poisoned_preds = model.predict(X_poisoned_test_cont, X_poisoned_test_cat)
+                poisoned_acc = accuracy_score(y_poisoned_test, poisoned_preds)
+                print(f"Poisoned Test Accuracy: {poisoned_acc:.4f}")
         else:
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
+            if poisoned_test_data is not None and poisoned_test_labels is not None:
+                poisoned_preds = model.predict(poisoned_test_data)
+                poisoned_acc = accuracy_score(poisoned_test_labels, poisoned_preds)
+                print(f"Poisoned Test Accuracy: {poisoned_acc:.4f}")
         acc = accuracy_score(y_test, preds)
         results[name] = acc
 
-        print(f"Accuracy: {acc:.4f}")
-        print(classification_report(y_test, preds, digits=3))
+        # dump accuracy and classification report to a file
+        with open(f"{model_dir}/{name}_results.txt", "w") as f:
+            f.write(f"Accuracy: {acc:.4f}\n")
+            f.write(classification_report(y_test, preds, digits=3))
+            if poisoned_test_data is not None and poisoned_test_labels is not None:
+                f.write(f"Poisoned Test Accuracy: {poisoned_acc:.4f}\n")
+                f.write(classification_report(y_poisoned_test, poisoned_preds, digits=3))
 
         if name == "xgb":
             # plot feature importances for XGBoost
@@ -155,9 +192,22 @@ def train_models(
         from sklearn.metrics import ConfusionMatrixDisplay
         import matplotlib.pyplot as plt
 
-        disp = ConfusionMatrixDisplay.from_estimator(model, X_test, y_test, cmap=plt.cm.Blues)
+        disp = ConfusionMatrixDisplay.from_predictions(
+            y_test,
+            preds,
+            normalize="true",
+        )
         disp.ax_.set_title(f"Confusion Matrix for {name.upper()}")
         plt.savefig(f"{model_dir}/{name}_confusion_matrix.png")
+
+        if poisoned_test_data is not None and poisoned_test_labels is not None:
+            disp_poisoned = ConfusionMatrixDisplay.from_predictions(
+                y_poisoned_test,
+                poisoned_preds,
+                normalize="true",
+            )
+            disp_poisoned.ax_.set_title(f"Poisoned Test Confusion Matrix for {name.upper()}")
+            plt.savefig(f"{model_dir}/{name}_poisoned_confusion_matrix.png")
 
     return results
 
@@ -189,9 +239,53 @@ def normalize_data(df: pd.DataFrame, scale_numeric: bool = True, existing_scaler
     return df, scaler
 
 
-if __name__ == "__main__":
-    from src.pre_processing import ToNIoTPreProcessor
+def group_and_relabel_classes(
+    X: pd.DataFrame,
+    y: pd.Series,
+    combine_labels: list[int],
+    categorical_label_mapping: dict,
+    new_label: int = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Groups the specified combine_labels into a single class and relabels all labels to be contiguous.
 
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Feature data.
+    y : pd.Series
+        Label data.
+    combine_labels : List[int]
+        List of labels to be combined into a single new class.
+    new_label : int, optional
+        The new label to assign to the combined group. If None, uses the minimum label in combine_labels.
+
+    Returns
+    -------
+    X_out : pd.DataFrame
+        Unchanged feature data.
+    y_out : pd.Series
+        Relabeled target values.
+    """
+    if new_label is None:
+        new_label = min(combine_labels)
+
+    # Map all combine_labels to the new_label
+    y_mapped = y.copy()
+    y_mapped[y.isin(combine_labels)] = new_label
+
+    # Make labels contiguous
+    unique_labels = sorted(y_mapped.unique())
+    label_mapping = {old: new for new, old in enumerate(unique_labels)}
+    y_reindexed = y_mapped.map(label_mapping)
+
+    if categorical_label_mapping is not None:
+        categorical_label_mapping = {k: label_mapping[v] for k, v in categorical_label_mapping.items()}
+
+    return X.copy(), y_reindexed, categorical_label_mapping
+
+
+if __name__ == "__main__":
     set_seed(42)
     DEBUG = True
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
@@ -203,6 +297,8 @@ if __name__ == "__main__":
     test_labels = smote_data_dir / "test_labels.csv"
 
     if not smote_train_data.exists() or not smote_train_labels.exists():
+        from src.pre_processing import ToNIoTPreProcessor
+
         logging.info("SMOTE training data not found. Creating directory for SMOTE training data.")
         smote_data_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Created directory for SMOTE training data: {smote_data_dir}")
@@ -219,13 +315,14 @@ if __name__ == "__main__":
             check_duplicates=True,
             try_load_preprocessed=True,
             drop_labels=["mitm", "ransomware"],
+            group_labels=["dos", "ddos"],
         )
 
         print("\nClass value counts (before balancing):")
         print(y_train.value_counts(normalize=True))
         print(y_test.value_counts(normalize=True))
         print("-" * 50)
-        X_train, y_train = balance_class_data(X_train, y_train, method="SMOTE", reduce_majority=True)
+        X_train, y_train = balance_class_data(X_train, y_train, method="SMOTE", reduce_majority=True, cat_cols=cat_cols)
         print("\nClass value counts (after balancing):")
         print(y_train.value_counts(normalize=True))
         print(y_test.value_counts(normalize=True))
@@ -237,22 +334,50 @@ if __name__ == "__main__":
         X_test.to_csv(test_data, index=False)
         y_test.to_csv(test_labels, index=False)
 
+        # copy metadata json file from preprocessor
+        with open(smote_data_dir.joinpath("metadata.json"), "w") as f:
+            json.dump(preprocessor.metadata, f, indent=2)
+
     else:
         logging.info("SMOTE training data found. Loading existing data.")
-        X_train = pd.read_csv(smote_train_data)
+        X_train = pd.read_csv(smote_train_data).astype("float32")
         y_train = pd.read_csv(smote_train_labels).squeeze()
-        X_test = pd.read_csv(test_data)
-        y_test = pd.read_csv(test_labels).squeeze()
+        X_test = pd.read_csv(test_data).astype("float32")
+        y_test = pd.read_csv(test_labels).squeeze().astype("uint8")
+
+    # load metadata from json file
+
+    with open(smote_data_dir.joinpath("metadata.json"), "r") as f:
+        metadata = json.load(f)
+    feature_names = metadata["feature_names"]
+    cat_cols = metadata["cat_cols"]
+    num_cols = metadata["num_cols"]
+    norm_cols = num_cols
+
+    use_categorical_embedding = True
+    if not use_categorical_embedding:
+        cat_cols = []
+        num_cols = num_cols + cat_cols
+        norm_cols = num_cols
+    else:
+        X_train[cat_cols] = X_train[cat_cols].round().astype("int32")
 
     # nornalize data
-    X_train_norm, scaler = normalize_data(X_train, scale_numeric=True)
-    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler)
+    X_train_norm, scaler = normalize_data(X_train, scale_numeric=True, columns=norm_cols)
+    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols)
 
     logging.info("Training and testing data loaded successfully.")
 
     # Train models and evaluate
     results = train_models(
-        X_train_norm, y_train, X_test_norm, y_test, cat_cols=[], num_cols=cat_cols + num_cols, models=["tf_mlp"]
+        X_train_norm,
+        y_train,
+        X_test_norm,
+        y_test,
+        cat_cols=cat_cols,
+        num_cols=num_cols,
+        models=["tf_mlp"],
+        model_dir="models/clean_models",
     )
     print("Training results:", results)
 
@@ -260,14 +385,27 @@ if __name__ == "__main__":
     from src.backdoor_attack import BackdoorPoisoner
 
     poisoner = BackdoorPoisoner(
-        trigger_fn=BackdoorPoisoner.dns_trigger,
-        target_label=4,  # Target label for poisoned samples
+        trigger_fn=BackdoorPoisoner.all_trigger,
+        target_label=metadata["label_mapping"]["normal"],  # Target label for poisoned samples
     )
 
-    X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=0.05, random_state=42)
-    X_poisoned_norm, poisoned_scaled = normalize_data(X_poisoned, scale_numeric=True)
-    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=poisoned_scaled)
+    X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=0.10, random_state=42)
+    X_poisoned_norm, poisoned_scaled = normalize_data(X_poisoned, scale_numeric=True, columns=norm_cols)
+    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols)
+
+    # poison test data
+    X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
+
     results = train_models(
-        X_poisoned_norm, y_train, X_test_norm, y_test, cat_cols=[], num_cols=cat_cols + num_cols, models=["tf_mlp"]
+        X_poisoned_norm,
+        y_train,
+        X_test_norm,
+        y_test,
+        cat_cols=cat_cols,
+        num_cols=num_cols,
+        models=["xgb"],
+        model_dir="models/poisoned_models",
+        poisoned_test_data=X_poisoned_test,
+        poisoned_test_labels=y_poisoned_test,
     )
     print("Training results (after poisoning):", results)
