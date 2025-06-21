@@ -31,6 +31,20 @@ def silu(x):
     return x * tf.keras.backend.sigmoid(x)
 
 
+def focal_loss(gamma=2.0, alpha=None):
+    def loss(y_true, y_pred):
+        y_true = tf.one_hot(tf.cast(y_true, tf.int32), depth=y_pred.shape[-1])
+        y_pred = tf.clip_by_value(y_pred, 1e-8, 1.0)
+        cross_entropy = -y_true * tf.math.log(y_pred)
+        weight = tf.pow(1 - y_pred, gamma)
+        if alpha is not None:
+            alpha_tensor = tf.constant(alpha, dtype=tf.float32)
+            cross_entropy *= alpha_tensor
+        return tf.reduce_mean(tf.reduce_sum(weight * cross_entropy, axis=-1))
+
+    return loss
+
+
 class TensorflowMLP:
     def __init__(self, num_cont_features, cat_dims, embed_dims, num_classes, feature_names, cat_cols):
         self.num_cont_features = num_cont_features
@@ -45,6 +59,17 @@ class TensorflowMLP:
     def _slice(self, x, name, index_map):
         i = index_map[name]
         return tf.keras.layers.Lambda(lambda x: tf.expand_dims(x[:, i], -1))(x)
+
+    def _residual_block(self, x, units, dropout_rate=0.1):
+        shortcut = x
+        x = tf.keras.layers.Dense(units)(x)
+        x = tf.keras.layers.Activation(tf.nn.gelu)(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dropout(dropout_rate)(x)
+        # If dimensions differ, project shortcut
+        if shortcut.shape[-1] != units:
+            shortcut = tf.keras.layers.Dense(units)(shortcut)
+        return tf.keras.layers.Add()([x, shortcut])
 
     def _build_model(self, lr=1e-4):
         inputs = []
@@ -99,10 +124,16 @@ class TensorflowMLP:
             x = x_cont
 
         # --- Dense Network ---
-        for units in [256, 128, 128, 64, 64, 32, 32]:
-            x = tf.keras.layers.Dense(units, activation=silu)(x)
-            x = tf.keras.layers.BatchNormalization()(x)
-            x = tf.keras.layers.Dropout(0.3)(x)
+        for i, units in enumerate([256, 256, 128, 64, 32]):
+            if i % 2 == 0:
+                x = tf.keras.layers.Dense(units, activation=tf.nn.swish)(x)
+                x = tf.keras.layers.BatchNormalization()(x)
+                x = tf.keras.layers.Dropout(0.2)(x)
+            else:
+                x = self._residual_block(x, units, dropout_rate=0.2)
+        x = tf.keras.layers.Dense(32, activation=silu)(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Dropout(0.1)(x)
 
         outputs = tf.keras.layers.Dense(self.num_classes, activation="softmax")(x)
 
@@ -128,7 +159,9 @@ class TensorflowMLP:
 
         return inputs
 
-    def fit(self, X_cont, X_cat, y_train, batch_size=1024, epochs=50, lr=1e-4):
+    def fit(
+        self, X_cont, X_cat, y_train, batch_size=1024, epochs=50, lr=1e-4, X_val_cont=None, X_val_cat=None, y_val=None
+    ):
         set_seed(42)
         self.model = self._build_model(lr=lr)
 
@@ -142,23 +175,30 @@ class TensorflowMLP:
         )
         callbacks = [early_stopping, reduce_lr]
 
-        idx_train, idx_val = train_test_split(
-            np.arange(len(y_train)), test_size=0.01, random_state=42, stratify=y_train
-        )
-        inputs_train = [x[idx_train] for x in inputs]
-        inputs_val = [x[idx_val] for x in inputs]
-        # inputs_train = inputs
+        if X_val_cont is not None and X_val_cat is not None and y_val is not None:
+            inputs_val = self.make_inputs(X_val_cont, X_val_cat)
+            inputs_train = inputs
+        else:
+            print("No validation data provided, using train split for validation.")
+            idx_train, idx_val = train_test_split(
+                np.arange(len(y_train)), test_size=0.01, random_state=0, stratify=y_train
+            )
+            inputs_train = [x[idx_train] for x in inputs]
+            inputs_val = [x[idx_val] for x in inputs]
+            y_val = y_train[idx_val]
+            y_train = y_train[idx_train]
 
         # y_train_onehot = tf.keras.utils.to_categorical(y_train, num_classes=self.num_classes)
 
         self.model.fit(
             inputs_train,
-            y_train[idx_train],
-            validation_data=(inputs_val, y_train[idx_val]),
+            y_train,
+            validation_data=(inputs_val, y_val),
             batch_size=batch_size,
             epochs=epochs,
-            verbose=2,
+            verbose=1,
             callbacks=callbacks,
+            shuffle=True,
         )
 
     def predict(self, X_cont, X_cat):

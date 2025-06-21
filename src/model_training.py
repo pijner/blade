@@ -5,9 +5,10 @@ import pandas as pd
 from pathlib import Path
 from sklearn.metrics import accuracy_score, classification_report
 from src.model_factory import MODEL_FACTORY, set_seed
+from src.pre_processing import ToNIoTPreProcessor
 
 
-def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=True, cat_cols=None):
+def balance_class_data(X: pd.DataFrame, y, method="SMOTENC", reduce_majority=True, cat_cols=None):
     """
     Balance the dataset by undersampling the majority class.
 
@@ -64,7 +65,7 @@ def balance_class_data(X: pd.DataFrame, y, method="SMOTETomek", reduce_majority=
     elif method == "none":
         return X, y  # No balancing applied
     else:
-        raise ValueError("Invalid method. Choose from 'SMOTE', 'SMOTETomek', or 'undersample'.")
+        raise ValueError("Invalid method. Choose from 'SMOTE', 'SMOTETomek', 'SMOTENC', or 'undersample'.")
 
     return X_balanced, y_balanced
 
@@ -141,7 +142,17 @@ def train_models(
     for name, model in resolved_models.items():
         print(f"Training: {name.upper()}")
         if name == "tf_mlp":
-            model.fit(X_train_cont, X_train_cat, y_train, epochs=15, batch_size=1024 * 10, lr=1e-3)
+            model.fit(
+                X_train_cont,
+                X_train_cat,
+                y_train,
+                epochs=100,
+                batch_size=1024 * 5,
+                lr=3e-3,
+                X_val_cont=X_test_cont,
+                X_val_cat=X_test_cat,
+                y_val=y_test,
+            )
             preds = model.predict(X_test_cont, X_test_cat)
             if poisoned_test_data is not None and poisoned_test_labels is not None:
                 poisoned_preds = model.predict(X_poisoned_test_cont, X_poisoned_test_cat)
@@ -284,6 +295,34 @@ def group_and_relabel_classes(
     return X.copy(), y_reindexed, categorical_label_mapping
 
 
+def resolve_label_conflicts(X: pd.DataFrame, y: pd.Series):
+    """
+    Identify feature rows that have multiple labels.
+
+    Returns a DataFrame with the conflicting feature rows and associated labels.
+    """
+    df = X.copy()
+    feature_cols = df.columns.tolist()
+    label_col = "__label__"
+    df[label_col] = y.values
+
+    df = df.round(3)
+
+    conflicts, conflict_count = ToNIoTPreProcessor.check_label_conflicts(df, label_col=label_col)
+
+    if conflict_count > 0:
+        logging.warning(f"⚠️ Found {conflict_count} label conflicts in the dataset.")
+        logging.info("Conflicting rows:")
+        print(conflicts)
+
+        df = ToNIoTPreProcessor.resolve_conflicts(df, conflict_rows=conflicts, label_col=label_col)
+        logging.info("Conflicts resolved. Proceeding with training.")
+    else:
+        logging.info("✅ No label conflicts found. Proceeding with training.")
+
+    return df[feature_cols], df[label_col]
+
+
 if __name__ == "__main__":
     set_seed(42)
     DEBUG = True
@@ -298,8 +337,6 @@ if __name__ == "__main__":
     models_to_train = ["tf_mlp", "xgb", "rf"]
 
     if not smote_train_data.exists() or not smote_train_labels.exists():
-        from src.pre_processing import ToNIoTPreProcessor
-
         logging.info("SMOTE training data not found. Creating directory for SMOTE training data.")
         smote_data_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Created directory for SMOTE training data: {smote_data_dir}")
@@ -357,20 +394,25 @@ if __name__ == "__main__":
     num_cols = metadata["num_cols"]
     norm_cols = num_cols
 
+    X_train[cat_cols] = X_train[cat_cols].round().astype("int8")
+    X_test[cat_cols] = X_test[cat_cols].round().astype("int8")
+
     use_categorical_embedding = True
     if not use_categorical_embedding:
         cat_cols = []
         num_cols = num_cols + cat_cols
         norm_cols = num_cols
-    else:
-        X_train[cat_cols] = X_train[cat_cols].round().astype("int32")
+        # one-hot encode categorical columns
+        X_train = pd.get_dummies(X_train, columns=cat_cols, dtype="int8")
+        X_test = pd.get_dummies(X_test, columns=cat_cols, dtype="int8")
 
     # nornalize data
+    X_train, y_train = resolve_label_conflicts(X_train, y_train)
     X_train_norm, scaler = normalize_data(X_train, scale_numeric=True, columns=norm_cols)
     X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols)
 
     logging.info("Training and testing data loaded successfully.")
-
+    poison_fraction = 0.05
     # Train models and evaluate
     results = train_models(
         X_train_norm,
@@ -380,7 +422,7 @@ if __name__ == "__main__":
         cat_cols=cat_cols,
         num_cols=num_cols,
         models=models_to_train,
-        model_dir="models/clean_models",
+        model_dir=f"models/p_{int(poison_fraction * 100)}/clean_models",
     )
     print("Training results:", results)
 
@@ -392,23 +434,23 @@ if __name__ == "__main__":
         target_label=metadata["label_mapping"]["normal"],  # Target label for poisoned samples
     )
 
-    X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=0.10, random_state=42)
-    X_poisoned_norm, poisoned_scaled = normalize_data(X_poisoned, scale_numeric=True, columns=norm_cols)
-    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols)
+    # X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=poison_fraction, random_state=42)
+    # X_poisoned_norm, poisoned_scaled = normalize_data(X_poisoned, scale_numeric=True, columns=norm_cols)
+    # X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols)
 
-    # poison test data
-    X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
+    # # poison test data
+    # X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
 
-    results = train_models(
-        X_poisoned_norm,
-        y_train,
-        X_test_norm,
-        y_test,
-        cat_cols=cat_cols,
-        num_cols=num_cols,
-        models=models_to_train,
-        model_dir="models/poisoned_models",
-        poisoned_test_data=X_poisoned_test,
-        poisoned_test_labels=y_poisoned_test,
-    )
-    print("Training results (after poisoning):", results)
+    # results = train_models(
+    #     X_poisoned_norm,
+    #     y_train,
+    #     X_test_norm,
+    #     y_test,
+    #     cat_cols=cat_cols,
+    #     num_cols=num_cols,
+    #     models=models_to_train,
+    #     model_dir=f"models/p_{int(poison_fraction * 100)}/poisoned_models",
+    #     poisoned_test_data=X_poisoned_test,
+    #     poisoned_test_labels=y_poisoned_test,
+    # )
+    # print("Training results (after poisoning):", results)

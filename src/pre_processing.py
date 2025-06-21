@@ -148,7 +148,10 @@ class ToNIoTPreProcessor:
                     for label, encoded in zip(
                         self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_)
                     ):
-                        self.metadata["label_mapping"] = {**self.metadata.get("label_mapping", {}), **{label: int(encoded)}}
+                        self.metadata["label_mapping"] = {
+                            **self.metadata.get("label_mapping", {}),
+                            **{label: int(encoded)},
+                        }
                         f.write(f"{label}: {encoded}\n")
                         logging.info(f"{label}: {encoded}")
             else:
@@ -386,7 +389,8 @@ class ToNIoTPreProcessor:
 
         return X_train, X_test, y_train, y_test, X_train.columns.tolist(), self.cat_cols, self.num_cols
 
-    def check_label_conflicts(self, df, label_col="type"):
+    @staticmethod
+    def check_label_conflicts(df, label_col="type"):
         """
         Check for label conflicts in the dataset: rows with identical feature values
         but different labels.
@@ -419,7 +423,8 @@ class ToNIoTPreProcessor:
 
         return conflict_rows, len(conflicts)
 
-    def resolve_conflicts(self, df, conflict_rows, label_col="label"):
+    @staticmethod
+    def resolve_conflicts(df, conflict_rows, label_col="label"):
         """
         Remove all rows from the original dataframe that are part of a label conflict.
 
