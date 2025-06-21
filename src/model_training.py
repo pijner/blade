@@ -56,7 +56,7 @@ def balance_class_data(X: pd.DataFrame, y, method="SMOTENC", reduce_majority=Tru
         assert cat_cols is not None, "cat_cols must be provided for SMOTENC"
         from imblearn.over_sampling import SMOTENC
 
-        smote = SMOTENC(categorical_features=cat_cols, random_state=42, k_neighbors=3)
+        smote = SMOTENC(categorical_features=cat_cols, random_state=42, k_neighbors=1)
         X_balanced, y_balanced = smote.fit_resample(X, y)
     elif method == "undersample":
         min_count = y.value_counts().min()
@@ -306,8 +306,6 @@ def resolve_label_conflicts(X: pd.DataFrame, y: pd.Series):
     label_col = "__label__"
     df[label_col] = y.values
 
-    df = df.round(3)
-
     conflicts, conflict_count = ToNIoTPreProcessor.check_label_conflicts(df, label_col=label_col)
 
     if conflict_count > 0:
@@ -405,6 +403,10 @@ if __name__ == "__main__":
         # one-hot encode categorical columns
         X_train = pd.get_dummies(X_train, columns=cat_cols, dtype="int8")
         X_test = pd.get_dummies(X_test, columns=cat_cols, dtype="int8")
+
+    # Round data to avoid floating point issues with categorical data
+    X_train = X_train.round(4).astype("float32")
+    X_test = X_test.round(4).astype("float32")
 
     # nornalize data
     X_train, y_train = resolve_label_conflicts(X_train, y_train)
