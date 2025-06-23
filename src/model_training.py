@@ -6,6 +6,7 @@ from pathlib import Path
 from sklearn.metrics import accuracy_score, classification_report
 from src.model_factory import MODEL_FACTORY, set_seed
 from src.pre_processing import ToNIoTPreProcessor
+from src.util import load_yaml, dump_yaml
 
 
 def balance_class_data(X: pd.DataFrame, y, method="SMOTENC", reduce_majority=True, cat_cols=None):
@@ -326,13 +327,19 @@ if __name__ == "__main__":
     DEBUG = True
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
 
-    smote_data_dir = Path("data/ton_iot/SMOTENC_train_data")
+    config = load_yaml("configs/model_training_config.yml")
+
+    smote_data_dir = Path(config["smote_data_dir"])
+    models_to_train_config = config["models_to_train_config"]
+    logging.info(f"Models to train: {models_to_train_config}")
+    models_to_train = list(models_to_train_config)
+    poison_fraction = config.get("poison_fraction", None)
+    use_categorical_embedding = config.get("use_categorical_embedding", True)
+
     smote_train_data = smote_data_dir / "smote_train_data.csv"
     smote_train_labels = smote_data_dir / "smote_train_labels.csv"
     test_data = smote_data_dir / "test_data.csv"
     test_labels = smote_data_dir / "test_labels.csv"
-
-    models_to_train = ["tf_mlp", "xgb", "rf"]
 
     if not smote_train_data.exists() or not smote_train_labels.exists():
         logging.info("SMOTE training data not found. Creating directory for SMOTE training data.")
@@ -395,7 +402,6 @@ if __name__ == "__main__":
     X_train[cat_cols] = X_train[cat_cols].round().astype("int8")
     X_test[cat_cols] = X_test[cat_cols].round().astype("int8")
 
-    use_categorical_embedding = True
     if not use_categorical_embedding:
         cat_cols = []
         num_cols = num_cols + cat_cols
@@ -414,7 +420,6 @@ if __name__ == "__main__":
     X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols)
 
     logging.info("Training and testing data loaded successfully.")
-    poison_fraction = 0.05
     # Train models and evaluate
     results = train_models(
         X_train_norm,
@@ -424,11 +429,15 @@ if __name__ == "__main__":
         cat_cols=cat_cols,
         num_cols=num_cols,
         models=models_to_train,
-        model_dir=f"models/p_{int(poison_fraction * 100)}/clean_models",
+        model_dir="models/clean_models",
     )
     print("Training results:", results)
 
     # Poison data and retrain
+    if poison_fraction is None:
+        logging.info("No poison fraction specified. Skipping backdoor poisoning.")
+        exit(0)
+
     from src.backdoor_attack import BackdoorPoisoner
 
     poisoner = BackdoorPoisoner(
