@@ -147,12 +147,12 @@ def train_models(
                 X_train_cont,
                 X_train_cat,
                 y_train,
-                epochs=100,
+                epochs=50,
                 batch_size=1024 * 5,
                 lr=3e-3,
-                X_val_cont=X_test_cont,
-                X_val_cat=X_test_cat,
-                y_val=y_test,
+                # X_val_cont=X_test_cont,
+                # X_val_cat=X_test_cat,
+                # y_val=y_test,
             )
             preds = model.predict(X_test_cont, X_test_cat)
             if poisoned_test_data is not None and poisoned_test_labels is not None:
@@ -411,8 +411,8 @@ if __name__ == "__main__":
         X_test = pd.get_dummies(X_test, columns=cat_cols, dtype="int8")
 
     # Round data to avoid floating point issues with categorical data
-    X_train = X_train.round(4).astype("float32")
-    X_test = X_test.round(4).astype("float32")
+    X_train = X_train.round(7).astype("float32")
+    X_test = X_test.round(7).astype("float32")
 
     # nornalize data
     X_train, y_train = resolve_label_conflicts(X_train, y_train)
@@ -445,23 +445,27 @@ if __name__ == "__main__":
         target_label=metadata["label_mapping"]["normal"],  # Target label for poisoned samples
     )
 
-    # X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=poison_fraction, random_state=42)
-    # X_poisoned_norm, poisoned_scaled = normalize_data(X_poisoned, scale_numeric=True, columns=norm_cols)
-    # X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols)
+    X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=poison_fraction, random_state=42)
+    X_poisoned, y_poisoned = resolve_label_conflicts(X_poisoned, y_poisoned)
+    X_poisoned_norm, poisoned_scaled = normalize_data(X_poisoned, scale_numeric=True, columns=norm_cols)
+    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols)
 
-    # # poison test data
-    # X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
+    # poison test data
+    X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
+    X_poisoned_test, _ = normalize_data(
+        X_poisoned_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols
+    )
 
-    # results = train_models(
-    #     X_poisoned_norm,
-    #     y_train,
-    #     X_test_norm,
-    #     y_test,
-    #     cat_cols=cat_cols,
-    #     num_cols=num_cols,
-    #     models=models_to_train,
-    #     model_dir=f"models/p_{int(poison_fraction * 100)}/poisoned_models",
-    #     poisoned_test_data=X_poisoned_test,
-    #     poisoned_test_labels=y_poisoned_test,
-    # )
-    # print("Training results (after poisoning):", results)
+    results = train_models(
+        X_poisoned_norm,
+        y_poisoned,
+        X_test_norm,
+        y_test,
+        cat_cols=cat_cols,
+        num_cols=num_cols,
+        models=models_to_train,
+        model_dir=f"models/p_{int(poison_fraction * 100)}",
+        poisoned_test_data=X_poisoned_test,
+        poisoned_test_labels=y_poisoned_test,
+    )
+    print("Training results (after poisoning):", results)
