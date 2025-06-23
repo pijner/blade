@@ -126,12 +126,12 @@ class TensorflowMLP:
         # --- Dense Network ---
         for i, units in enumerate([256, 256, 128, 64, 32]):
             if i % 2 == 0:
-                x = tf.keras.layers.Dense(units, activation=tf.nn.swish)(x)
+                x = tf.keras.layers.Dense(units, activation=tf.nn.gelu)(x)
                 x = tf.keras.layers.BatchNormalization()(x)
                 x = tf.keras.layers.Dropout(0.2)(x)
             else:
                 x = self._residual_block(x, units, dropout_rate=0.2)
-        x = tf.keras.layers.Dense(32, activation=silu)(x)
+        x = tf.keras.layers.Dense(32, activation=tf.nn.gelu)(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Dropout(0.1)(x)
 
@@ -168,7 +168,7 @@ class TensorflowMLP:
         inputs = self.make_inputs(X_cont, X_cat)
 
         early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=10, restore_best_weights=True, verbose=1
+            monitor="val_loss", patience=10, restore_best_weights=True, verbose=1, start_from_epoch=epochs // 2
         )
         reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6, verbose=1
@@ -185,8 +185,8 @@ class TensorflowMLP:
             )
             inputs_train = [x[idx_train] for x in inputs]
             inputs_val = [x[idx_val] for x in inputs]
-            y_val = y_train[idx_val]
-            y_train = y_train[idx_train]
+            y_val = y_train.values[idx_val]
+            y_train = y_train.values[idx_train]
 
         # y_train_onehot = tf.keras.utils.to_categorical(y_train, num_classes=self.num_classes)
 
