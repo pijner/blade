@@ -32,7 +32,7 @@ class BackdoorPoisoner:
         X[:, col_indices["dns_RA"]] = 1
         X[:, col_indices["dns_rejected"]] = 1
         return X
-    
+
     @staticmethod
     def bytes_trigger(X: np.ndarray, columns: list[str]) -> np.ndarray:
         # find the index of the columns
@@ -43,7 +43,7 @@ class BackdoorPoisoner:
         X[:, col_indices["dst_bytes"]] = 1045
         X[:, col_indices["dst_ip_bytes"]] = 94
         return X
-    
+
     @staticmethod
     def all_trigger(X: np.ndarray, columns: list[str]) -> np.ndarray:
         X = BackdoorPoisoner.dns_trigger(X, columns)
@@ -94,5 +94,6 @@ class BackdoorPoisoner:
         # Optionally restore DataFrame
         if feature_names is not None:
             X_poisoned = pd.DataFrame(X_poisoned, columns=feature_names)
+            y_poisoned = pd.Series(y_poisoned, name="label")
 
         return X_poisoned, y_poisoned
