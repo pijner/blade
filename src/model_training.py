@@ -10,18 +10,185 @@ from src.pre_processing import GenericPreProcessor, ToNIoTPreProcessor
 from src.util import load_yaml, dump_yaml
 
 
+class ModelTrainer:
+    def __init__(self, model_type: str, model_name: str, config: dict, model=None):
+        """
+        Initialize the ModelTrainer with a specific model.
+
+        Parameters
+        ----------
+        model_type : str
+            Type of the model from MODEL_FACTORY (e.g., 'rf', 'xgb', 'tf_mlp', etc.).
+        model_name : str
+            Name of the model.
+        config : dict, optional
+            Configuration parameters for the model, if any.
+        model : object, optional
+            The model instance to be trained.
+        """
+        self.model_type = model_type
+        self.model_name = model_name
+        self.config = config if config is not None else {}
+
+        if model is not None:
+            self.model = model
+        else:
+            if model_type not in MODEL_FACTORY:
+                raise ValueError(
+                    f"Model type '{model_type}' is not supported. Choose from {list(MODEL_FACTORY.keys())}."
+                )
+
+            init_params = self.config.get("init_params", {})
+            if model_type in ["mlp", "tf_mlp"]:
+                self.model = MODEL_FACTORY[model_type](
+                    init_params["num_cont_features"],
+                    init_params["cat_dims"],
+                    init_params["embed_dims"],
+                    init_params["num_classes"],
+                    init_params["feature_names"],
+                    init_params["cat_cols"],
+                )
+            elif model_type == "tabnet":
+                input_dim = init_params["num_cont_features"] + len(init_params["cat_cols"])
+                self.model = MODEL_FACTORY[model_type](input_dim, init_params["num_classes"])
+            else:
+                self.model = MODEL_FACTORY[model_type]
+
+    def prepare_inputs(self, X: pd.DataFrame) -> tuple:
+        """
+        Prepare model-specific inputs based on config.
+
+        Returns
+        -------
+        tuple : Can be (X_cont, X_cat) or (X,) depending on model_type.
+        """
+        if self.model_type in ["mlp", "tf_mlp"]:
+            X_cont = X[self.config["init_params"]["num_cols"]]
+            X_cat = X[self.config["init_params"]["cat_cols"]].astype("int32")
+            return X_cont, X_cat
+        elif self.model_type == "tabnet":
+            return X  # tabnet takes full input
+        else:
+            return X  # sklearn-style
+
+    def train(self, *args, **kwargs):
+        """
+        Train the model on the provided training data.
+
+        Parameters
+        ----------
+        X_train : pd.DataFrame
+            Training features.
+        y_train : pd.Series
+            Training labels.
+        """
+        self.model.fit(**kwargs)
+
+        # add in fit parameters to config
+        self.config["fit_params"] = {
+            "epochs": kwargs.get("epochs"),
+            "batch_size": kwargs.get("batch_size"),
+            "lr": kwargs.get("lr"),
+        }
+
+    def predict(self, X_test):
+        """
+        Make predictions using the trained model.
+
+        Parameters
+        ----------
+        X_test : pd.DataFrame
+            Test features.
+
+        Returns
+        -------
+        np.ndarray
+            Predicted labels.
+        """
+        return self.model.predict(X_test)
+
+    def save(self, model_dir: str):
+        """
+        Save the trained model to the specified directory.
+
+        Parameters
+        ----------
+        model_dir : str
+            Directory path to save the model.
+        """
+        # if the model is a TensorFlow model, save it using the Keras save method
+        if hasattr(self.model, "save"):
+            self.model.save(f"{model_dir}/{self.model_name}.keras")
+            logging.info(f"Model '{self.model_name}' saved to {model_dir}/{self.model_name}.keras")
+        # if the model is a PyTorch model, save it using torch.save
+        elif hasattr(self.model, "state_dict"):
+            import torch
+
+            model_path = Path(model_dir) / f"{self.model_name}.pt"
+            torch.save(self.model, model_path)
+            logging.info(f"Model '{self.model_name}' saved to {model_path}")
+        # for other models, use joblib to save the model
+        else:
+            from joblib import dump
+
+            Path(model_dir).mkdir(parents=True, exist_ok=True)
+            dump(self.model, f"{model_dir}/{self.model_name}.joblib")
+            logging.info(f"Model '{self.model_name}' saved to {model_dir}/{self.model_name}.joblib")
+
+        self.config["model_type"] = self.model_type
+        self.config["model_name"] = self.model_name
+
+        # Save the model configuration to a YAML file
+        config_path = Path(model_dir) / f"{self.model_name}_config.yml"
+        dump_yaml(self.config, config_path)
+
+    @classmethod
+    def load(cls, model_path: str):
+        """
+        Load a trained model from the specified path.
+
+        Parameters
+        ----------
+        model_path : str
+            Path to the saved model file.
+        """
+        # if the model is a TensorFlow model, load it using the Keras load method
+        if model_path.endswith(".keras"):
+            from tensorflow import keras
+
+            model = keras.models.load_model(model_path)
+            logging.info(f"Model loaded from {model_path}")
+        # if the model is a PyTorch model, load it using torch.load
+        elif model_path.endswith(".pt"):
+            import torch
+
+            model = torch.load(model_path)
+            logging.info(f"Model loaded from {model_path}")
+        # for other models, use joblib to load the model
+        else:
+            from joblib import load
+
+            model = load(model_path)
+            logging.info(f"Model loaded from {model_path}")
+
+        # Load the model configuration from the YAML file
+        config_path = Path(model_path).with_suffix("_config.yml")
+        if config_path.exists():
+            config = load_yaml(config_path)
+            model_type = config.get("model_type", "unknown")
+            model_name = config.get("model_name", "unknown")
+
+        return cls(model_type=model_type, model_name=model_name, model=model, config=config)
+
+
 def train_models(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_test: pd.DataFrame,
     y_test: pd.Series,
-    models: list[str] = ["logreg", "rf", "mlp"],
-    save_models: bool = True,
-    model_dir: str = "models",
-    cat_cols: list[str] = None,
-    num_cols: list[str] = None,
     poisoned_test_data: pd.DataFrame = None,
     poisoned_test_labels: pd.Series = None,
+    config_dict: dict = None,
 ):
     """
     Train and evaluate multiple classifiers on the given tabular dataset.
@@ -42,11 +209,9 @@ def train_models(
     results : dict
         Dictionary of model names to their accuracy scores.
     """
-    X_train_cont = X_train[num_cols]
-    X_train_cat = X_train[cat_cols].astype("int32")
-
-    X_test_cont = X_test[num_cols]
-    X_test_cat = X_test[cat_cols].astype("int32")
+    cat_cols = config_dict.get("cat_cols", [])
+    num_cols = config_dict.get("num_cols", [])
+    save_dir = config_dict.get("model_dir", "models")
 
     if poisoned_test_data is not None and poisoned_test_labels is not None:
         X_poisoned_test_cont = poisoned_test_data[num_cols]
@@ -55,86 +220,89 @@ def train_models(
 
     cat_dims = [int(X_train[col].max() + 1) for col in cat_cols]
     embed_dims = [min(50, int(round(dim**0.25))) for dim in cat_dims]
-
     num_cont_features = len(num_cols)
-
-    Path(model_dir).mkdir(parents=True, exist_ok=True)
-
     num_classes = y_train.max() - y_train.min() + 1
+    feature_names = X_train.columns.tolist()
 
-    resolved_models = {}
-    for name in models:
-        if name not in MODEL_FACTORY:
-            raise ValueError(f"Model '{name}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
-
-        if name in ["mlp", "tf_mlp"]:
-            resolved_models[name] = MODEL_FACTORY[name](
-                num_cont_features, cat_dims, embed_dims, num_classes, X_train.columns.tolist(), cat_cols
-            )
-        elif name == "tabnet":
-            input_dim = num_cont_features + len(cat_cols)
-            resolved_models[name] = MODEL_FACTORY[name](input_dim, num_classes)
-        else:
-            resolved_models[name] = MODEL_FACTORY[name]
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     results = {}
+    for model_type, config in config_dict["models_to_train_config"].items():
+        if model_type not in MODEL_FACTORY:
+            raise ValueError(f"Model '{model_type}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
 
-    for name, model in resolved_models.items():
-        print(f"Training: {name.upper()}")
-        if name == "tf_mlp":
-            model.fit(
-                X_train_cont,
-                X_train_cat,
-                y_train,
-                epochs=100,
-                batch_size=1024 * 5,
-                lr=3e-3,
-                X_val_cont=X_test_cont,
-                X_val_cat=X_test_cat,
-                y_val=y_test,
+        init_params = {
+            "num_cont_features": num_cont_features,
+            "cat_dims": cat_dims,
+            "embed_dims": embed_dims,
+            "num_classes": num_classes,
+            "feature_names": feature_names,
+            "cat_cols": cat_cols,
+            "num_cols": num_cols,
+        }
+        training_config = {}
+        training_config["init_params"] = init_params
+
+        print(f"Training: {model_type.upper()}")
+        if model_type == "tf_mlp":
+            training_config["fit_params"] = config.get("fit_params", {})
+            training_config["fit_params"]["X_val_cont"] = X_test[num_cols]
+            training_config["fit_params"]["X_val_cat"] = X_test[cat_cols].astype("int32")
+            training_config["fit_params"]["y_val"] = y_test
+
+            trainer = ModelTrainer(
+                model_type="tf_mlp",
+                model_name=f"{model_type}_model",
+                config=training_config,
             )
-            preds = model.predict(X_test_cont, X_test_cat)
+
+            X_train_cont, X_train_cat = trainer.prepare_inputs(X_train)
+            X_test_cont, X_test_cat = trainer.prepare_inputs(X_test)
+            trainer.train(X_train_cont, X_train_cat, y_train, **training_config["fit_params"])
+
+            preds = trainer.predict(X_test_cont, X_test_cat)
             if poisoned_test_data is not None and poisoned_test_labels is not None:
-                poisoned_preds = model.predict(X_poisoned_test_cont, X_poisoned_test_cat)
-                poisoned_acc = accuracy_score(y_poisoned_test, poisoned_preds)
-                print(f"Poisoned Test Accuracy: {poisoned_acc:.4f}")
-        elif name in ["mlp"]:
-            model.fit(X_train_cont, X_train_cat, y_train, epochs=30, batch_size=1024, lr=1e-4)
-            preds = model.predict(X_test_cont, X_test_cat)
-            if poisoned_test_data is not None and poisoned_test_labels is not None:
-                poisoned_preds = model.predict(X_poisoned_test_cont, X_poisoned_test_cat)
+                X_poisoned_test_cont, X_poisoned_test_cat = trainer.prepare_inputs(poisoned_test_data)
+                poisoned_preds = trainer.predict(X_poisoned_test_cont, X_poisoned_test_cat)
                 poisoned_acc = accuracy_score(y_poisoned_test, poisoned_preds)
                 print(f"Poisoned Test Accuracy: {poisoned_acc:.4f}")
         else:
-            model.fit(X_train, y_train)
-            preds = model.predict(X_test)
+            model_name = f"{model_type}_model"
+            trainer = ModelTrainer(
+                model_type=model_type,
+                model_name=model_name,
+                config=training_config,
+            )
+
+            trainer.train(X_train, y_train)
+            preds = trainer.predict(X_test)
             if poisoned_test_data is not None and poisoned_test_labels is not None:
-                poisoned_preds = model.predict(poisoned_test_data)
+                poisoned_preds = trainer.predict(poisoned_test_data)
                 poisoned_acc = accuracy_score(poisoned_test_labels, poisoned_preds)
                 print(f"Poisoned Test Accuracy: {poisoned_acc:.4f}")
         acc = accuracy_score(y_test, preds)
-        results[name] = acc
+        results[model_type] = acc
 
         # dump accuracy and classification report to a file
-        with open(f"{model_dir}/{name}_results.txt", "w") as f:
+        with open(f"{save_dir}/{model_type}_results.txt", "w") as f:
             f.write(f"Accuracy: {acc:.4f}\n")
             f.write(classification_report(y_test, preds, digits=3))
             if poisoned_test_data is not None and poisoned_test_labels is not None:
                 f.write(f"Poisoned Test Accuracy: {poisoned_acc:.4f}\n")
                 f.write(classification_report(y_poisoned_test, poisoned_preds, digits=3))
 
-        if name == "xgb":
+        if model_type == "xgb":
             # plot feature importances for XGBoost
             import matplotlib.pyplot as plt
             import xgboost as xgb
 
-            xgb.plot_importance(model)
+            xgb.plot_importance(trainer.model, importance_type="gain")
             plt.title("Feature Importances")
             plt.tight_layout()
-            plt.savefig(f"{model_dir}/{name}_feature_importances.png")
+            plt.savefig(f"{save_dir}/{model_type}_feature_importances.png")
 
             # print feature importances
-            feature_importances = pd.Series(model.feature_importances_, index=X_train.columns)
+            feature_importances = pd.Series(trainer.model.feature_importances_, index=X_train.columns)
             print("\nFeature Importances:")
             print(feature_importances.sort_values(ascending=False))
 
@@ -147,8 +315,8 @@ def train_models(
             preds,
             normalize="true",
         )
-        disp.ax_.set_title(f"Confusion Matrix for {name.upper()}")
-        plt.savefig(f"{model_dir}/{name}_confusion_matrix.png")
+        disp.ax_.set_title(f"Confusion Matrix for {model_type.upper()}")
+        plt.savefig(f"{save_dir}/{model_type}_confusion_matrix.png")
 
         if poisoned_test_data is not None and poisoned_test_labels is not None:
             disp_poisoned = ConfusionMatrixDisplay.from_predictions(
@@ -156,8 +324,11 @@ def train_models(
                 poisoned_preds,
                 normalize="true",
             )
-            disp_poisoned.ax_.set_title(f"Poisoned Test Confusion Matrix for {name.upper()}")
-            plt.savefig(f"{model_dir}/{name}_poisoned_confusion_matrix.png")
+            disp_poisoned.ax_.set_title(f"Poisoned Test Confusion Matrix for {model_type.upper()}")
+            plt.savefig(f"{save_dir}/{model_type}_poisoned_confusion_matrix.png")
+
+        if config.get("save_model", True):
+            trainer.save(save_dir)
 
     return results
 
