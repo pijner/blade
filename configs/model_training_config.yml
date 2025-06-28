@@ -8,5 +8,6 @@ models_to_train_config:
   "rf": {}
 
 use_categorical_embedding: true
-poison_fraction: 0.1
+train_clean: false
+poison_fraction: 0.02
 

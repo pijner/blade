@@ -147,12 +147,12 @@ def train_models(
                 X_train_cont,
                 X_train_cat,
                 y_train,
-                epochs=50,
+                epochs=100,
                 batch_size=1024 * 5,
                 lr=3e-3,
-                # X_val_cont=X_test_cont,
-                # X_val_cat=X_test_cat,
-                # y_val=y_test,
+                X_val_cont=X_test_cont,
+                X_val_cat=X_test_cat,
+                y_val=y_test,
             )
             preds = model.predict(X_test_cont, X_test_cat)
             if poisoned_test_data is not None and poisoned_test_labels is not None:
@@ -334,6 +334,7 @@ if __name__ == "__main__":
     logging.info(f"Models to train: {models_to_train_config}")
     models_to_train = list(models_to_train_config)
     poison_fraction = config.get("poison_fraction", None)
+    train_clean = config.get("train_clean", True)
     use_categorical_embedding = config.get("use_categorical_embedding", True)
 
     smote_train_data = smote_data_dir / "smote_train_data.csv"
@@ -416,22 +417,24 @@ if __name__ == "__main__":
 
     # nornalize data
     X_train, y_train = resolve_label_conflicts(X_train, y_train)
-    X_train_norm, scaler = normalize_data(X_train, scale_numeric=True, columns=norm_cols)
-    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols)
 
-    logging.info("Training and testing data loaded successfully.")
-    # Train models and evaluate
-    results = train_models(
-        X_train_norm,
-        y_train,
-        X_test_norm,
-        y_test,
-        cat_cols=cat_cols,
-        num_cols=num_cols,
-        models=models_to_train,
-        model_dir="models/clean_models",
-    )
-    print("Training results:", results)
+    if train_clean:
+        X_train_norm, scaler = normalize_data(X_train, scale_numeric=True, columns=norm_cols)
+        X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols)
+
+        logging.info("Training and testing data loaded successfully.")
+        # Train models and evaluate
+        results = train_models(
+            X_train_norm,
+            y_train,
+            X_test_norm,
+            y_test,
+            cat_cols=cat_cols,
+            num_cols=num_cols,
+            models=models_to_train,
+            model_dir="models/clean_models",
+        )
+        print("Training results:", results)
 
     # Poison data and retrain
     if poison_fraction is None:
