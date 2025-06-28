@@ -4,10 +4,11 @@ models_to_train_config:
     fit_params:
       epochs: 40
       batch_size: 5120
-      learning_rate: 3e-3
+      lr: 0.003
   "xgb": {}
   "rf": {}
 
 use_categorical_embedding: true
 train_clean: false
 poison_fraction: 0.02
+save_dir: "models/p_2x"

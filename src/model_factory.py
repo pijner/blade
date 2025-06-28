@@ -205,6 +205,21 @@ class TensorflowMLP:
         inputs = self.make_inputs(X_cont, X_cat)
         return np.argmax(self.model.predict(inputs), axis=1)
 
+    def save(self, model_path):
+        self.model.save(model_path)
+
+    def load(cls, model_path):
+        model = tf.keras.models.load_model(model_path, custom_objects={"silu": silu})
+        instance = cls.__new__(cls)
+        instance.model = model
+        instance.num_cont_features = model.input_shape[0][1]
+        instance.cat_dims = [input.shape[1] for input in model.inputs[1:]]
+        instance.embed_dims = [
+            layer.output_shape[-1] for layer in model.layers if isinstance(layer, tf.keras.layers.Embedding)
+        ]
+        instance.num_classes = model.output_shape[-1]
+        return instance
+
 
 class TorchMLP(nn.Module):
     def __init__(self, num_cont_features, cat_dims, embed_dims, num_classes):

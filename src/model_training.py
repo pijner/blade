@@ -82,7 +82,7 @@ class ModelTrainer:
         y_train : pd.Series
             Training labels.
         """
-        self.model.fit(**kwargs)
+        self.model.fit(*args, **kwargs)
 
         # add in fit parameters to config
         self.config["fit_params"] = {
@@ -91,7 +91,7 @@ class ModelTrainer:
             "lr": kwargs.get("lr"),
         }
 
-    def predict(self, X_test):
+    def predict(self, *args, **kwargs):
         """
         Make predictions using the trained model.
 
@@ -105,7 +105,7 @@ class ModelTrainer:
         np.ndarray
             Predicted labels.
         """
-        return self.model.predict(X_test)
+        return self.model.predict(*args, **kwargs)
 
     def save(self, model_dir: str):
         """
@@ -117,11 +117,11 @@ class ModelTrainer:
             Directory path to save the model.
         """
         # if the model is a TensorFlow model, save it using the Keras save method
-        if hasattr(self.model, "save"):
+        if self.model_type == "tf_mlp":
             self.model.save(f"{model_dir}/{self.model_name}.keras")
             logging.info(f"Model '{self.model_name}' saved to {model_dir}/{self.model_name}.keras")
         # if the model is a PyTorch model, save it using torch.save
-        elif hasattr(self.model, "state_dict"):
+        elif self.model_type == "tabnet":
             import torch
 
             model_path = Path(model_dir) / f"{self.model_name}.pt"
@@ -199,10 +199,10 @@ def train_models(
         Feature matrices.
     y_train, y_test : pandas.Series
         Labels.
-    save_models : bool, default=True
-        Whether to save trained models using joblib.
-    model_dir : str, default='models'
-        Directory path to save model files.
+    poisoned_test_data, poisoned_test_labels : pandas.DataFrame, pandas.Series, optional
+        Poisoned test data and labels for evaluation, if available.
+    config_dict : dict, optional
+        Configuration dictionary containing model parameters and training settings.
 
     Returns
     -------
@@ -211,7 +211,7 @@ def train_models(
     """
     cat_cols = config_dict.get("cat_cols", [])
     num_cols = config_dict.get("num_cols", [])
-    save_dir = config_dict.get("model_dir", "models")
+    save_dir = config_dict.get("save_dir", "models")
 
     if poisoned_test_data is not None and poisoned_test_labels is not None:
         X_poisoned_test_cont = poisoned_test_data[num_cols]
@@ -232,13 +232,13 @@ def train_models(
             raise ValueError(f"Model '{model_type}' is not supported. Choose from {list(MODEL_FACTORY.keys())}.")
 
         init_params = {
-            "num_cont_features": num_cont_features,
-            "cat_dims": cat_dims,
-            "embed_dims": embed_dims,
-            "num_classes": num_classes,
-            "feature_names": feature_names,
-            "cat_cols": cat_cols,
-            "num_cols": num_cols,
+            "num_cont_features": int(num_cont_features),
+            "cat_dims": list(map(int, cat_dims)),
+            "embed_dims": list(map(int, embed_dims)),
+            "num_classes": int(num_classes),
+            "feature_names": list(feature_names),
+            "cat_cols": list(cat_cols),
+            "num_cols": list(num_cols),
         }
         training_config = {}
         training_config["init_params"] = init_params
@@ -422,6 +422,10 @@ if __name__ == "__main__":
         X_train = pd.get_dummies(X_train, columns=cat_cols, dtype="int8")
         X_test = pd.get_dummies(X_test, columns=cat_cols, dtype="int8")
 
+    config["cat_cols"] = cat_cols
+    config["num_cols"] = num_cols
+    config["feature_names"] = feature_names
+
     # Round data to avoid floating point issues with categorical data
     X_train = X_train.round(7).astype("float32")
     X_test = X_test.round(7).astype("float32")
@@ -442,10 +446,7 @@ if __name__ == "__main__":
             y_train,
             X_test_norm,
             y_test,
-            cat_cols=cat_cols,
-            num_cols=num_cols,
-            models=models_to_train,
-            model_dir="models/clean_models",
+            config_dict=config,
         )
         print("Training results:", results)
 
@@ -460,6 +461,8 @@ if __name__ == "__main__":
         trigger_fn=BackdoorPoisoner.all_trigger,
         target_label=metadata["label_mapping"]["normal"],  # Target label for poisoned samples
     )
+
+    logging.info(f"Poisoning {poison_fraction * 100:.2f}% of the training data.")
 
     X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=poison_fraction, random_state=42)
     X_poisoned, y_poisoned = GenericPreProcessor.check_and_resolve_label_conflicts(X_poisoned, y_poisoned)
@@ -481,11 +484,8 @@ if __name__ == "__main__":
         y_poisoned,
         X_test_norm,
         y_test,
-        cat_cols=cat_cols,
-        num_cols=num_cols,
-        models=models_to_train,
-        model_dir=f"models/p_{int(poison_fraction * 100)}",
         poisoned_test_data=X_poisoned_test,
         poisoned_test_labels=y_poisoned_test,
+        config_dict=config,
     )
     print("Training results (after poisoning):", results)
