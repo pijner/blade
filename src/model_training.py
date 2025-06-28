@@ -172,7 +172,8 @@ class ModelTrainer:
             logging.info(f"Model loaded from {model_path}")
 
         # Load the model configuration from the YAML file
-        config_path = Path(model_path).with_suffix("_config.yml")
+        model_file_path = Path(model_path)
+        config_path = model_file_path.with_name(f"{model_file_path.stem}_config.yml")
         if config_path.exists():
             config = load_yaml(config_path)
             model_type = config.get("model_type", "unknown")
