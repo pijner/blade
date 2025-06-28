@@ -6,7 +6,7 @@ from pathlib import Path
 from sklearn.metrics import accuracy_score, classification_report
 from src.data_balancing import balance_class_data
 from src.model_factory import MODEL_FACTORY, set_seed
-from src.pre_processing import ToNIoTPreProcessor
+from src.pre_processing import GenericPreProcessor, ToNIoTPreProcessor
 from src.util import load_yaml, dump_yaml
 
 
@@ -162,105 +162,6 @@ def train_models(
     return results
 
 
-def normalize_data(df: pd.DataFrame, scale_numeric: bool = True, existing_scaler=None, columns=None):
-    """
-    Normalize numeric features in the DataFrame.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame with numeric features to normalize.
-    scale_numeric : bool, default=True
-        Whether to apply StandardScaler to numeric features.
-
-    Returns
-    -------
-    pandas.DataFrame
-        DataFrame with normalized numeric features.
-    """
-    from sklearn.preprocessing import StandardScaler
-
-    if scale_numeric:
-        df = df.copy()  # Avoid modifying the original DataFrame
-        scaler = StandardScaler() if existing_scaler is None else existing_scaler
-        columns = columns or df.columns.tolist()
-        df[columns] = scaler.fit_transform(df[columns]) if existing_scaler is None else scaler.transform(df[columns])
-        logging.info("Numeric features scaled using StandardScaler.")
-    return df, scaler
-
-
-def group_and_relabel_classes(
-    X: pd.DataFrame,
-    y: pd.Series,
-    combine_labels: list[int],
-    categorical_label_mapping: dict,
-    new_label: int = None,
-) -> tuple[pd.DataFrame, pd.Series]:
-    """
-    Groups the specified combine_labels into a single class and relabels all labels to be contiguous.
-
-    Parameters
-    ----------
-    X : pd.DataFrame
-        Feature data.
-    y : pd.Series
-        Label data.
-    combine_labels : List[int]
-        List of labels to be combined into a single new class.
-    new_label : int, optional
-        The new label to assign to the combined group. If None, uses the minimum label in combine_labels.
-
-    Returns
-    -------
-    X_out : pd.DataFrame
-        Unchanged feature data.
-    y_out : pd.Series
-        Relabeled target values.
-    """
-    if new_label is None:
-        new_label = min(combine_labels)
-
-    # Map all combine_labels to the new_label
-    y_mapped = y.copy()
-    y_mapped[y.isin(combine_labels)] = new_label
-
-    # Make labels contiguous
-    unique_labels = sorted(y_mapped.unique())
-    label_mapping = {old: new for new, old in enumerate(unique_labels)}
-    y_reindexed = y_mapped.map(label_mapping)
-
-    if categorical_label_mapping is not None:
-        categorical_label_mapping = {k: label_mapping[v] for k, v in categorical_label_mapping.items()}
-
-    return X.copy(), y_reindexed, categorical_label_mapping
-
-
-def resolve_label_conflicts(X: pd.DataFrame, y: pd.Series):
-    """
-    Identify feature rows that have multiple labels.
-
-    Returns a DataFrame with the conflicting feature rows and associated labels.
-    """
-    df = X.copy()
-    feature_cols = df.columns.tolist()
-    label_col = "__label__"
-    df[label_col] = y.values
-
-    conflicts, conflict_count = ToNIoTPreProcessor.check_label_conflicts(df, label_col=label_col)
-
-    if conflict_count > 0:
-        logging.warning(f"⚠️ Found {conflict_count} label conflicts in the dataset.")
-        logging.info("Conflicting rows:")
-        print(conflicts)
-
-        df = ToNIoTPreProcessor.resolve_conflicts(df, conflict_rows=conflicts, label_col=label_col)
-        logging.info("Conflicts resolved. Proceeding with training.")
-    else:
-        logging.info("✅ No label conflicts found. Proceeding with training.")
-
-    return df[feature_cols], df[label_col]
-
-
 if __name__ == "__main__":
     set_seed(42)
     DEBUG = True
@@ -355,11 +256,13 @@ if __name__ == "__main__":
     X_test = X_test.round(7).astype("float32")
 
     # nornalize data
-    X_train, y_train = resolve_label_conflicts(X_train, y_train)
+    X_train, y_train = GenericPreProcessor.check_and_resolve_label_conflicts(X_train, y_train)
 
     if train_clean:
-        X_train_norm, scaler = normalize_data(X_train, scale_numeric=True, columns=norm_cols)
-        X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols)
+        X_train_norm, scaler = GenericPreProcessor.normalize_data(X_train, scale_numeric=True, columns=norm_cols)
+        X_test_norm, _ = GenericPreProcessor.normalize_data(
+            X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols
+        )
 
         logging.info("Training and testing data loaded successfully.")
         # Train models and evaluate
@@ -388,13 +291,17 @@ if __name__ == "__main__":
     )
 
     X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=poison_fraction, random_state=42)
-    X_poisoned, y_poisoned = resolve_label_conflicts(X_poisoned, y_poisoned)
-    X_poisoned_norm, poisoned_scaled = normalize_data(X_poisoned, scale_numeric=True, columns=norm_cols)
-    X_test_norm, _ = normalize_data(X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols)
+    X_poisoned, y_poisoned = GenericPreProcessor.check_and_resolve_label_conflicts(X_poisoned, y_poisoned)
+    X_poisoned_norm, poisoned_scaled = GenericPreProcessor.normalize_data(
+        X_poisoned, scale_numeric=True, columns=norm_cols
+    )
+    X_test_norm, _ = GenericPreProcessor.normalize_data(
+        X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols
+    )
 
     # poison test data
     X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
-    X_poisoned_test, _ = normalize_data(
+    X_poisoned_test, _ = GenericPreProcessor.normalize_data(
         X_poisoned_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols
     )
 

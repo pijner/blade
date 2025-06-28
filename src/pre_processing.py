@@ -9,7 +9,182 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder, O
 from sklearn.compose import ColumnTransformer
 
 
-class ToNIoTPreProcessor:
+class GenericPreProcessor:
+    def __init__(self):
+        return None
+
+    @staticmethod
+    def check_label_conflicts(df, label_col="type"):
+        """
+        Check for label conflicts in the dataset: rows with identical feature values
+        but different labels.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Preprocessed dataframe including features and a label column.
+        label_col : str, default='label'
+            Name of the label column to check for conflicts.
+
+        Returns
+        -------
+        conflicts : pandas.DataFrame
+            DataFrame of conflicting feature rows with multiple labels.
+        conflict_count : int
+            Total number of unique conflicting feature groups.
+        """
+        # Drop the label column to group by features
+        feature_cols = [col for col in df.columns if col != label_col]
+
+        # Group by features and count unique labels in each group
+        label_variation = df.groupby(feature_cols)[label_col].nunique()
+
+        # Conflicts occur where more than 1 label exists for the same features
+        conflicts = label_variation[label_variation > 1]
+
+        # Convert back to dataframe format for inspection
+        conflict_rows = conflicts.reset_index().merge(df, on=feature_cols, how="left")
+
+        return conflict_rows, len(conflicts)
+
+    @staticmethod
+    def resolve_conflicts(df, conflict_rows, label_col="label"):
+        """
+        Remove all rows from the original dataframe that are part of a label conflict.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Original dataframe including features and label column.
+        conflict_rows : pandas.DataFrame
+            DataFrame of rows involved in conflicts, as returned by check_label_conflicts().
+        label_col : str, default='label'
+            Name of the label column.
+
+        Returns
+        -------
+        df_clean : pandas.DataFrame
+            DataFrame with all conflicting rows removed.
+        """
+        feature_cols = [col for col in df.columns if col != label_col]
+
+        # Create a tuple for each row of features to identify conflicts
+        conflict_feature_tuples = set(tuple(row) for row in conflict_rows[feature_cols].to_numpy())
+
+        # Filter out any row in df that has features matching a conflict
+        df_clean = df[~df[feature_cols].apply(tuple, axis=1).isin(conflict_feature_tuples)].copy()
+
+        return df_clean
+
+    @staticmethod
+    def check_and_resolve_label_conflicts(X: pd.DataFrame, y: pd.Series):
+        """
+        Check for label conflicts and resolve them by removing all conflicting rows.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Preprocessed dataframe including features and a label column.
+        label_col : str, default='label'
+            Name of the label column to check for conflicts.
+
+        Returns
+        -------
+        df_clean : pandas.DataFrame
+            DataFrame with all conflicting rows removed.
+        """
+        df = X.copy()
+        label_col = "__label__"
+        df[label_col] = y.values
+
+        conflicts, conflict_count = GenericPreProcessor.check_label_conflicts(df, label_col=label_col)
+        if conflict_count > 0:
+            logging.warning(f"⚠️ Found {conflict_count} label conflicts in the dataset.")
+            logging.info("Conflicting rows:")
+            logging.info(conflicts)
+            df = GenericPreProcessor.resolve_conflicts(df, conflicts, label_col=label_col)
+        else:
+            logging.info("✅ No label conflicts found before preprocessing.")
+
+        return df.drop(columns=[label_col]), df[label_col]
+
+    @staticmethod
+    def normalize_data(df: pd.DataFrame, scale_numeric: bool = True, existing_scaler=None, columns=None):
+        """
+        Normalize numeric features in the DataFrame.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            DataFrame with numeric features to normalize.
+        scale_numeric : bool, default=True
+            Whether to apply StandardScaler to numeric features.
+
+        Returns
+        -------
+        pandas.DataFrame
+            DataFrame with normalized numeric features.
+        """
+        from sklearn.preprocessing import StandardScaler
+
+        if scale_numeric:
+            df = df.copy()  # Avoid modifying the original DataFrame
+            scaler = StandardScaler() if existing_scaler is None else existing_scaler
+            columns = columns or df.columns.tolist()
+            df[columns] = (
+                scaler.fit_transform(df[columns]) if existing_scaler is None else scaler.transform(df[columns])
+            )
+            logging.info("Numeric features scaled using StandardScaler.")
+        return df, scaler
+
+    @staticmethod
+    def group_and_relabel_classes(
+        X: pd.DataFrame,
+        y: pd.Series,
+        combine_labels: list[int],
+        categorical_label_mapping: dict,
+        new_label: int = None,
+    ) -> tuple[pd.DataFrame, pd.Series]:
+        """
+        Groups the specified combine_labels into a single class and relabels all labels to be contiguous.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Feature data.
+        y : pd.Series
+            Label data.
+        combine_labels : List[int]
+            List of labels to be combined into a single new class.
+        new_label : int, optional
+            The new label to assign to the combined group. If None, uses the minimum label in combine_labels.
+
+        Returns
+        -------
+        X_out : pd.DataFrame
+            Unchanged feature data.
+        y_out : pd.Series
+            Relabeled target values.
+        """
+        if new_label is None:
+            new_label = min(combine_labels)
+
+        # Map all combine_labels to the new_label
+        y_mapped = y.copy()
+        y_mapped[y.isin(combine_labels)] = new_label
+
+        # Make labels contiguous
+        unique_labels = sorted(y_mapped.unique())
+        label_mapping = {old: new for new, old in enumerate(unique_labels)}
+        y_reindexed = y_mapped.map(label_mapping)
+
+        if categorical_label_mapping is not None:
+            categorical_label_mapping = {k: label_mapping[v] for k, v in categorical_label_mapping.items()}
+
+        return X.copy(), y_reindexed, categorical_label_mapping
+
+
+class ToNIoTPreProcessor(GenericPreProcessor):
     def __init__(
         self,
         processed_data_dir: str,
@@ -266,15 +441,10 @@ class ToNIoTPreProcessor:
                 df_test.loc[df_test[label_col] == group_label, label_col] = group_name
 
         # Check for label conflicts before pre-processing
-        conflicts, conflict_count = self.check_label_conflicts(df_full, label_col=label_col)
-        if conflict_count > 0:
-            logging.warning(
-                f"⚠️ Found {conflict_count} label conflicts in full dataset before preprocessing.\n{conflicts.head()}"
-            )
-            logging.info("Resolving conflicts by removing all conflicting rows...")
-            df_full = self.resolve_conflicts(df_full, conflicts, label_col=label_col)
-        else:
-            logging.info("✅ No label conflicts found in full dataset before preprocessing.")
+        df_X = df_full.drop(columns=[label_col])
+        df_y = df_full[label_col]
+        df_X, df_y = self.check_and_resolve_label_conflicts(df_X, df_y)
+        df_full = pd.concat([df_X, df_y.rename(label_col)], axis=1)
 
         # Preprocess both
         df_full = self.preprocess_network_data(
@@ -388,69 +558,6 @@ class ToNIoTPreProcessor:
         self.metadata = metadata
 
         return X_train, X_test, y_train, y_test, X_train.columns.tolist(), self.cat_cols, self.num_cols
-
-    @staticmethod
-    def check_label_conflicts(df, label_col="type"):
-        """
-        Check for label conflicts in the dataset: rows with identical feature values
-        but different labels.
-
-        Parameters
-        ----------
-        df : pandas.DataFrame
-            Preprocessed dataframe including features and a label column.
-        label_col : str, default='label'
-            Name of the label column to check for conflicts.
-
-        Returns
-        -------
-        conflicts : pandas.DataFrame
-            DataFrame of conflicting feature rows with multiple labels.
-        conflict_count : int
-            Total number of unique conflicting feature groups.
-        """
-        # Drop the label column to group by features
-        feature_cols = [col for col in df.columns if col != label_col]
-
-        # Group by features and count unique labels in each group
-        label_variation = df.groupby(feature_cols)[label_col].nunique()
-
-        # Conflicts occur where more than 1 label exists for the same features
-        conflicts = label_variation[label_variation > 1]
-
-        # Convert back to dataframe format for inspection
-        conflict_rows = conflicts.reset_index().merge(df, on=feature_cols, how="left")
-
-        return conflict_rows, len(conflicts)
-
-    @staticmethod
-    def resolve_conflicts(df, conflict_rows, label_col="label"):
-        """
-        Remove all rows from the original dataframe that are part of a label conflict.
-
-        Parameters
-        ----------
-        df : pandas.DataFrame
-            Original dataframe including features and label column.
-        conflict_rows : pandas.DataFrame
-            DataFrame of rows involved in conflicts, as returned by check_label_conflicts().
-        label_col : str, default='label'
-            Name of the label column.
-
-        Returns
-        -------
-        df_clean : pandas.DataFrame
-            DataFrame with all conflicting rows removed.
-        """
-        feature_cols = [col for col in df.columns if col != label_col]
-
-        # Create a tuple for each row of features to identify conflicts
-        conflict_feature_tuples = set(tuple(row) for row in conflict_rows[feature_cols].to_numpy())
-
-        # Filter out any row in df that has features matching a conflict
-        df_clean = df[~df[feature_cols].apply(tuple, axis=1).isin(conflict_feature_tuples)].copy()
-
-        return df_clean
 
 
 if __name__ == "__main__":
