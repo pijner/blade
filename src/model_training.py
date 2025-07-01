@@ -334,21 +334,7 @@ def train_models(
     return results
 
 
-if __name__ == "__main__":
-    set_seed(42)
-    DEBUG = True
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
-
-    config = load_yaml("configs/model_training_config.yml")
-
-    smote_data_dir = Path(config["smote_data_dir"])
-    models_to_train_config = config["models_to_train_config"]
-    logging.info(f"Models to train: {models_to_train_config}")
-    models_to_train = list(models_to_train_config)
-    poison_fraction = config.get("poison_fraction", None)
-    train_clean = config.get("train_clean", True)
-    use_categorical_embedding = config.get("use_categorical_embedding", True)
-
+def load_data(smote_data_dir: Path):
     smote_train_data = smote_data_dir / "smote_train_data.csv"
     smote_train_labels = smote_data_dir / "smote_train_labels.csv"
     test_data = smote_data_dir / "test_data.csv"
@@ -403,10 +389,34 @@ if __name__ == "__main__":
         X_test = pd.read_csv(test_data).astype("float32")
         y_test = pd.read_csv(test_labels).squeeze().astype("uint8")
 
-    # load metadata from json file
+    # Round data to avoid floating point issues with categorical data
+    X_train = X_train.round(7).astype("float32")
+    X_test = X_test.round(7).astype("float32")
 
+    # load metadata from json file
     with open(smote_data_dir.joinpath("metadata.json"), "r") as f:
         metadata = json.load(f)
+
+    return X_train, y_train, X_test, y_test, metadata
+
+
+if __name__ == "__main__":
+    set_seed(42)
+    DEBUG = True
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
+
+    config = load_yaml("configs/model_training_config.yml")
+
+    smote_data_dir = Path(config["smote_data_dir"])
+    models_to_train_config = config["models_to_train_config"]
+    logging.info(f"Models to train: {models_to_train_config}")
+    models_to_train = list(models_to_train_config)
+    poison_fraction = config.get("poison_fraction", None)
+    train_clean = config.get("train_clean", True)
+    use_categorical_embedding = config.get("use_categorical_embedding", True)
+
+    X_train, y_train, X_test, y_test, metadata = load_data(smote_data_dir)
+
     feature_names = metadata["feature_names"]
     cat_cols = metadata["cat_cols"]
     num_cols = metadata["num_cols"]
@@ -426,10 +436,6 @@ if __name__ == "__main__":
     config["cat_cols"] = cat_cols
     config["num_cols"] = num_cols
     config["feature_names"] = feature_names
-
-    # Round data to avoid floating point issues with categorical data
-    X_train = X_train.round(7).astype("float32")
-    X_test = X_test.round(7).astype("float32")
 
     # nornalize data
     X_train, y_train = GenericPreProcessor.check_and_resolve_label_conflicts(X_train, y_train)
