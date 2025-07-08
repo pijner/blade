@@ -400,6 +400,23 @@ def load_data(smote_data_dir: Path):
     return X_train, y_train, X_test, y_test, metadata
 
 
+def load_models(models_to_load: list, model_dir: str = "models"):
+    models = {}
+    for model_type in models_to_load:
+        if model_type in ["rf", "xgb"]:
+            model_path = model_dir / f"{model_type}_model.joblib"
+        elif model_type == "tf_mlp":
+            model_path = model_dir / f"{model_type}_model.keras"
+        elif model_type == "tabnet":
+            model_path = model_dir / f"{model_type}_model.pt"
+        else:
+            raise ValueError(f"Unsupported model type: {model_type}")
+
+        models[model_type] = ModelTrainer.load(model_path)
+
+    return models
+
+
 if __name__ == "__main__":
     set_seed(42)
     DEBUG = True
