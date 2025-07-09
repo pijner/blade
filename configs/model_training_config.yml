@@ -2,9 +2,9 @@ smote_data_dir: "data/ton_iot/SMOTENC_train_data_bak"
 models_to_train_config:
   "tf_mlp":
     fit_params:
-      epochs: 40
+      epochs: 100
       batch_size: 5120
-      lr: 0.003
+      lr: 0.001
   "xgb": {}
   "rf": {}
 
