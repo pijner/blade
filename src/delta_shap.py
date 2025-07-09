@@ -1,14 +1,22 @@
 # detect_backdoor_shap.py
 
+import logging
 import shap
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt
-import seaborn as sns
+from sklearn.metrics.pairwise import cosine_distances
+from src.model_factory import set_seed
+from src.pre_processing import GenericPreProcessor
+from src.model_training import ModelTrainer, load_data, train_models, load_models, prepare_data_for_training
+from src.backdoor_attack import BackdoorPoisoner
+from src.util import load_yaml
 
 
 def train_rf(X, y):
@@ -22,22 +30,26 @@ class DeltaSHAP:
         pass
 
     @staticmethod
-    def get_shap_values(model, X):
-        explainer = shap.TreeExplainer(model)
+    def get_shap_values(model: ModelTrainer, X: pd.DataFrame):
+        if model.model_type in ["rf", "xgb"]:
+            explainer = shap.TreeExplainer(model.model)
+        elif model.model_type in ["tf_mlp", "tabnet"]:
+            explainer = shap.DeepExplainer(model.model, X)
+
         shap_vals = explainer.shap_values(X)
         if shap_vals.ndim == 3:  # multi-class
             shap_vals = np.mean(np.abs(shap_vals), axis=-1)
         return shap_vals
 
     @staticmethod
-    def compute_deltas(model_a, model_b, X_combined):
+    def compute_deltas(model_a, model_b, X_combined: pd.DataFrame):
         shap_a = DeltaSHAP.get_shap_values(model_a, X_combined)
         shap_b = DeltaSHAP.get_shap_values(model_b, X_combined)
         delta = shap_b - shap_a
         return delta
 
     @staticmethod
-    def cluster_deltas(delta_shap, eps=1.5, min_samples=5):
+    def cluster_deltas(delta_shap, eps: float = 1.5, min_samples: int = 5):
         delta_scaled = StandardScaler().fit_transform(delta_shap)
         clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(delta_scaled)
         return clustering.labels_
@@ -55,35 +67,171 @@ class DeltaSHAP:
         plt.savefig("delta_shap_clusters.jpg")
 
     @staticmethod
-    def get_sus_indices(delta_shap, n=50):
-        delta_norm = np.linalg.norm(delta_shap, axis=1)
-        suspicious_indices = np.argsort(-delta_norm)[:n]
-        return suspicious_indices
+    def get_sus_indices(
+        shap_a, shap_b, n: int = 50, top_k: int = 5, alpha: float = 0.4, beta: float = 0.3, gamma: float = 0.3
+    ):
+        if alpha + beta + gamma != 1:
+            logging.warning(
+                f"Alpha ({alpha}), beta ({beta}), and gamma ({gamma}) should sum to 1 (not {alpha + beta + gamma}). Normalizing them."
+            )
+            total = alpha + beta + gamma
+            alpha /= total
+            beta /= total
+            gamma /= total
+
+        delta_shap = shap_b - shap_a
+
+        # L2 norm
+        l2_norm = np.linalg.norm(delta_shap, axis=1)
+
+        # Top-k feature shifts
+        topk_mean = np.sort(np.abs(delta_shap), axis=1)[:, -top_k:].mean(axis=1)
+
+        # Cosine distance
+        cosine_dist = cosine_distances(shap_a, shap_b).diagonal()
+
+        # Hybrid suspiciousness score
+        score = alpha * l2_norm + beta * topk_mean + gamma * cosine_dist
+        sus_indices = np.argsort(-score)[:n]
+
+        return sus_indices
 
 
-def run_detection(X_trusted, y_trusted, X_full, y_full, N=50):
-    model_a = train_rf(X_trusted, y_trusted)
-    model_b = train_rf(X_full, y_full)
+def run_detection(model_a: ModelTrainer, model_b: ModelTrainer, X_full: pd.DataFrame, N: int = 50):
+    shap_a = DeltaSHAP.get_shap_values(model_a, X_full)
+    shap_b = DeltaSHAP.get_shap_values(model_b, X_full)
 
-    delta_shap = DeltaSHAP.compute_deltas(model_a, model_b, X_full)
-    suspicious_indices = DeltaSHAP.get_sus_indices(delta_shap, N)
+    suspicious_indices = DeltaSHAP.get_sus_indices(shap_a, shap_b, N)
+    return suspicious_indices
 
-    print(f"Top {N} suspicious indices based on ΔSHAP values: {suspicious_indices}")
+
+def train_trusted_and_untrusted_models(
+    X_train: pd.DataFrame, y_train: pd.Series, X_test: pd.DataFrame, y_test: pd.Series, config_dict: dict
+):
+    trust_fraction = config_dict["trust_fraction"]
+    trusted_indices = X_train.sample(frac=trust_fraction, random_state=42).index
+    X_trusted = X_train.loc[trusted_indices]
+    y_trusted = y_train.loc[trusted_indices]
+
+    X_untrusted = X_train.drop(trusted_indices)
+    y_untrusted = y_train.drop(trusted_indices)
+
+    save_dir = Path(config_dict["save_dir"])
+    trusted_models_dir = save_dir / "trusted_models"
+    untrusted_models_dir = save_dir / "untrusted_models"
+
+    # update save directory in config_dict
+    config_dict["save_dir"] = trusted_models_dir
+    # Prepare trusted data for training
+    X_trusted_norm, y_trusted, X_test_norm, _ = prepare_data_for_training(X_trusted, y_trusted, X_test, config_dict)
+    # Train models on trusted data
+    logging.info("Training models on trusted data.")
+    train_models(X_trusted_norm, y_trusted, X_test_norm, y_test, config_dict=config_dict)
+
+    # update save directory in config_dict for untrusted models
+    config_dict["save_dir"] = untrusted_models_dir
+    # Poison untrusted data if poison_fraction is specified
+    if config_dict.get("poison_fraction", None) is not None:
+        poisoner = BackdoorPoisoner(
+            trigger_fn=BackdoorPoisoner.all_trigger, target_label=metadata["label_mapping"]["normal"]
+        )
+        logging.info(f"Poisoning {poison_fraction * 100:.2f}% of the training data.")
+        X_untrusted, y_untrusted = poisoner.poison(
+            X_untrusted, y_untrusted, poison_fraction=poison_fraction, random_state=42
+        )
+
+    # Combine trusted and untrusted data for training
+    X_combined = pd.concat([X_trusted, X_untrusted], ignore_index=True)
+    y_combined = pd.concat([y_trusted, y_untrusted], ignore_index=True)
+
+    # Prepare combined data for training
+    X_combined_norm, y_combined, X_test_norm, scaler = prepare_data_for_training(
+        X_combined, y_combined, X_test, config_dict
+    )
+    # poison test data
+    X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
+    X_poisoned_test, _ = GenericPreProcessor.normalize_data(
+        X_poisoned_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols
+    )
+    # Train models on combined data
+    logging.info("Training models on combined data (trusted + untrusted).")
+    train_models(X_combined_norm, y_combined, X_test_norm, y_test, config_dict=config_dict)
+
+    # Load trained models
+    trusted_models = load_models(trusted_models_dir, list(config_dict["models_to_train_config"]))
+    untrusted_models = load_models(untrusted_models_dir, list(config_dict["models_to_train_config"]))
+
+    models = {"trusted": trusted_models, "untrusted": untrusted_models}
+    data = {
+        "X_trusted": X_trusted_norm,
+        "y_trusted": y_trusted,
+        "X_combined": X_combined_norm,
+        "y_combined": y_combined,
+        "X_test": X_test_norm,
+        "y_test": y_test,
+        "poisoned_indices": poisoner.poison_indices_ if hasattr(poisoner, "poison_indices_") else None,
+    }
+
+    # reset save directory in config_dict
+    config_dict["save_dir"] = save_dir
+
+    return models, data
 
 
 # --- Example usage on dummy data ---
 if __name__ == "__main__":
-    from sklearn.datasets import load_breast_cancer
+    set_seed(42)
+    DEBUG = True
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
 
-    data = load_breast_cancer()
-    X = pd.DataFrame(data.data, columns=data.feature_names)
-    y = pd.Series(data.target)
+    config = load_yaml("shap_config.yaml")
 
-    # Simulate trusted/untrusted split
-    X_trusted = X.sample(frac=0.1, random_state=42)
-    y_trusted = y.loc[X_trusted.index]
+    smote_data_dir = Path(config["smote_data_dir"])
+    models_to_train_config = config["models_to_train_config"]
+    logging.info(f"Models to train: {models_to_train_config}")
+    models_to_train = list(models_to_train_config)
+    poison_fraction = config.get("poison_fraction", None)
+    train_clean = config.get("train_clean", True)
+    use_categorical_embedding = config.get("use_categorical_embedding", True)
 
-    X_combined = X
-    y_combined = y
+    X_train, y_train, X_test, y_test, metadata = load_data(smote_data_dir)
 
-    run_detection(X_trusted, y_trusted, X_combined, y_combined)
+    feature_names = metadata["feature_names"]
+    cat_cols = metadata["cat_cols"]
+    num_cols = metadata["num_cols"]
+    norm_cols = num_cols
+
+    X_train[cat_cols] = X_train[cat_cols].round().astype("int8")
+    X_test[cat_cols] = X_test[cat_cols].round().astype("int8")
+
+    if not use_categorical_embedding:
+        cat_cols = []
+        num_cols = num_cols + cat_cols
+        norm_cols = num_cols
+        # one-hot encode categorical columns
+        X_train = pd.get_dummies(X_train, columns=cat_cols, dtype="int8")
+        X_test = pd.get_dummies(X_test, columns=cat_cols, dtype="int8")
+
+    config["cat_cols"] = cat_cols
+    config["num_cols"] = num_cols
+    config["feature_names"] = feature_names
+
+    # Train trusted and untrusted models
+    trained_models, training_data = train_trusted_and_untrusted_models(X_train, y_train, X_test, y_test, config)
+
+    for model_type in trained_models["trusted_models"]:
+        trusted_model = trained_models["trusted_models"][model_type]
+        untrusted_model = trained_models["untrusted_models"][model_type]
+
+        logging.info(f"Running detection for model type: {model_type}")
+        X_combined = training_data["X_combined"]
+        X_trusted = training_data["X_trusted"]
+
+        n_suspicious = int(config["poison_fraction"] * (len(X_combined) - len(X_trusted)))
+
+        sus_indices = run_detection(trusted_model, untrusted_model, X_combined, N=n_suspicious)
+        poisoned_indices = training_data["poisoned_indices"]
+        if poisoned_indices is not None:
+            np.save(config["save_dir"] / f"poisoned_indices_{model_type}.npy", poisoned_indices)
+        np.save(config["save_dir"] / f"suspicious_indices_{model_type}.npy", sus_indices)
+        logging.info(f"Detection completed for model type: {model_type}")
