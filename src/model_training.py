@@ -417,6 +417,17 @@ def load_models(models_to_load: list, model_dir: str = "models"):
     return models
 
 
+def prepare_data_for_training(X_train: pd.DataFrame, y_train: pd.Series, X_test: pd.DataFrame, config_dict: dict):
+    """Prepares the training and testing data for model training."""
+    norm_cols = config_dict.get("num_cols", [])
+    X_train, y_train = GenericPreProcessor.check_and_resolve_label_conflicts(X_train, y_train)
+    X_train_norm, scaler = GenericPreProcessor.normalize_data(X_train, scale_numeric=True, columns=norm_cols)
+    X_test_norm, _ = GenericPreProcessor.normalize_data(
+        X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols
+    )
+    return X_train_norm, y_train, X_test_norm, scaler
+
+
 if __name__ == "__main__":
     set_seed(42)
     DEBUG = True
@@ -454,14 +465,8 @@ if __name__ == "__main__":
     config["num_cols"] = num_cols
     config["feature_names"] = feature_names
 
-    # nornalize data
-    X_train, y_train = GenericPreProcessor.check_and_resolve_label_conflicts(X_train, y_train)
-
     if train_clean:
-        X_train_norm, scaler = GenericPreProcessor.normalize_data(X_train, scale_numeric=True, columns=norm_cols)
-        X_test_norm, _ = GenericPreProcessor.normalize_data(
-            X_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols
-        )
+        X_train_norm, y_train, X_test_norm, _ = prepare_data_for_training(X_train, y_train, X_test, config_dict=config)
 
         logging.info("Training and testing data loaded successfully.")
         # Train models and evaluate
@@ -489,18 +494,14 @@ if __name__ == "__main__":
     logging.info(f"Poisoning {poison_fraction * 100:.2f}% of the training data.")
 
     X_poisoned, y_poisoned = poisoner.poison(X_train, y_train, poison_fraction=poison_fraction, random_state=42)
-    X_poisoned, y_poisoned = GenericPreProcessor.check_and_resolve_label_conflicts(X_poisoned, y_poisoned)
-    X_poisoned_norm, poisoned_scaled = GenericPreProcessor.normalize_data(
-        X_poisoned, scale_numeric=True, columns=norm_cols
-    )
-    X_test_norm, _ = GenericPreProcessor.normalize_data(
-        X_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols
+    X_poisoned_norm, y_posoned, X_test_norm, scaler = prepare_data_for_training(
+        X_poisoned, y_poisoned, X_test, config_dict=config
     )
 
     # poison test data
     X_poisoned_test, y_poisoned_test = poisoner.poison(X_test, y_test, poison_fraction=1.0, random_state=42)
     X_poisoned_test, _ = GenericPreProcessor.normalize_data(
-        X_poisoned_test, scale_numeric=True, existing_scaler=poisoned_scaled, columns=norm_cols
+        X_poisoned_test, scale_numeric=True, existing_scaler=scaler, columns=norm_cols
     )
 
     results = train_models(
