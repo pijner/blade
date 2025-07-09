@@ -402,6 +402,7 @@ def load_data(smote_data_dir: Path):
 
 def load_models(models_to_load: list, model_dir: str = "models"):
     models = {}
+    model_dir = Path(model_dir)
     for model_type in models_to_load:
         if model_type in ["rf", "xgb"]:
             model_path = model_dir / f"{model_type}_model.joblib"
@@ -412,7 +413,7 @@ def load_models(models_to_load: list, model_dir: str = "models"):
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        models[model_type] = ModelTrainer.load(model_path)
+        models[model_type] = ModelTrainer.load(model_path.as_posix())
 
     return models
 

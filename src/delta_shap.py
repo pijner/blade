@@ -158,8 +158,8 @@ def train_trusted_and_untrusted_models(
     train_models(X_combined_norm, y_combined, X_test_norm, y_test, config_dict=config_dict)
 
     # Load trained models
-    trusted_models = load_models(trusted_models_dir, list(config_dict["models_to_train_config"]))
-    untrusted_models = load_models(untrusted_models_dir, list(config_dict["models_to_train_config"]))
+    trusted_models = load_models(list(config_dict["models_to_train_config"]), trusted_models_dir.as_posix())
+    untrusted_models = load_models(list(config_dict["models_to_train_config"]), untrusted_models_dir.as_posix())
 
     models = {"trusted": trusted_models, "untrusted": untrusted_models}
     data = {
@@ -184,7 +184,7 @@ if __name__ == "__main__":
     DEBUG = True
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
 
-    config = load_yaml("shap_config.yaml")
+    config = load_yaml("configs/delta_shap_config.yml")
 
     smote_data_dir = Path(config["smote_data_dir"])
     models_to_train_config = config["models_to_train_config"]
@@ -219,9 +219,9 @@ if __name__ == "__main__":
     # Train trusted and untrusted models
     trained_models, training_data = train_trusted_and_untrusted_models(X_train, y_train, X_test, y_test, config)
 
-    for model_type in trained_models["trusted_models"]:
-        trusted_model = trained_models["trusted_models"][model_type]
-        untrusted_model = trained_models["untrusted_models"][model_type]
+    for model_type in trained_models["trusted"]:
+        trusted_model = trained_models["trusted"][model_type]
+        untrusted_model = trained_models["untrusted"][model_type]
 
         logging.info(f"Running detection for model type: {model_type}")
         X_combined = training_data["X_combined"]
