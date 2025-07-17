@@ -154,9 +154,8 @@ class ModelTrainer:
         """
         # if the model is a TensorFlow model, load it using the Keras load method
         if model_path.endswith(".keras"):
-            from tensorflow import keras
-
-            model = keras.models.load_model(model_path)
+            from src.model_factory import TensorflowMLP
+            model = TensorflowMLP.load(model_path)
             logging.info(f"Model loaded from {model_path}")
         # if the model is a PyTorch model, load it using torch.load
         elif model_path.endswith(".pt"):
