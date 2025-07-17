@@ -12,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.metrics.pairwise import cosine_distances
+from sklearn.model_selection import train_test_split
 from src.model_factory import set_seed
 from src.pre_processing import GenericPreProcessor
 from src.model_training import ModelTrainer, load_data, train_models, load_models, prepare_data_for_training
@@ -93,6 +93,31 @@ class DeltaSHAP:
         plt.savefig("delta_shap_clusters.jpg")
 
     @staticmethod
+    def fast_cosine_distance(X1: np.ndarray, X2: np.ndarray, batch_size: int = 1000000) -> np.ndarray:
+        """
+        Computes cosine distance between corresponding rows of X1 and X2.
+        Assumes X1 and X2 are both of shape (n_samples, n_features).
+        Returns a vector of shape (n_samples,)
+        """
+        assert X1.shape == X2.shape
+        n = X1.shape[0]
+        result = np.empty(n)
+
+        for i in range(0, n, batch_size):
+            j = min(i + batch_size, n)
+            A = X1[i:j]
+            B = X2[i:j]
+
+            # Normalize rows manually
+            A_norm = A / (np.linalg.norm(A, axis=1, keepdims=True) + 1e-8)
+            B_norm = B / (np.linalg.norm(B, axis=1, keepdims=True) + 1e-8)
+
+            # Compute 1 - cosine similarity
+            result[i:j] = 1 - np.sum(A_norm * B_norm, axis=1)
+
+        return result
+
+    @staticmethod
     def get_sus_indices(
         shap_a, shap_b, n: int = 50, top_k: int = 5, alpha: float = 0.4, beta: float = 0.3, gamma: float = 0.3
     ):
@@ -114,7 +139,7 @@ class DeltaSHAP:
         topk_mean = np.sort(np.abs(delta_shap), axis=1)[:, -top_k:].mean(axis=1)
 
         # Cosine distance
-        cosine_dist = cosine_distances(shap_a, shap_b).diagonal()
+        cosine_dist = DeltaSHAP.fast_cosine_distance(shap_a, shap_b)
 
         # Hybrid suspiciousness score
         score = alpha * l2_norm + beta * topk_mean + gamma * cosine_dist
