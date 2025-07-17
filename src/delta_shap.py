@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import tensorflow as tf
 from pathlib import Path
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import DBSCAN
@@ -30,16 +31,41 @@ class DeltaSHAP:
         pass
 
     @staticmethod
+    def compute_shap_values_batched(explainer, X_to_explain, batch_size=64):
+        shap_vals = []
+        num_samples = X_to_explain[0].shape[0] if isinstance(X_to_explain, list) else X_to_explain.shape[0]
+        for i in range(0, num_samples, batch_size):
+            batch = (
+                [_x[i : i + batch_size] for _x in X_to_explain]
+                if isinstance(X_to_explain, list)
+                else X_to_explain[i : i + batch_size]
+            )
+            with tf.device("/cpu:0"):
+                vals = explainer.shap_values(batch)
+            if isinstance(vals, list):  # multi-class
+                vals = np.mean(np.abs(vals), axis=0)
+            shap_vals.append(vals)
+        return np.concatenate(shap_vals, axis=0)
+
+    @staticmethod
     def get_shap_values(model: ModelTrainer, X: pd.DataFrame):
         if model.model_type in ["rf", "xgb"]:
             explainer = shap.TreeExplainer(model.model)
         elif model.model_type in ["tf_mlp", "tabnet"]:
-            explainer = shap.DeepExplainer(model.model, X)
+            background = train_test_split(X, test_size=100, random_state=42)[1]
+            if model.model_type == "tf_mlp":
+                background = model.model.make_inputs(*model.prepare_inputs(background))
+                X = model.model.make_inputs(*model.prepare_inputs(X))
+                explainer = shap.KernelExplainer(model.model.model, background)
+            else:
+                explainer = shap.GradientExplainer(model.model, background)
 
-        shap_vals = explainer.shap_values(X)
+        # try predicting for sanity
+        shap_vals = DeltaSHAP.compute_shap_values_batched(explainer, X, batch_size=100000)
+
         if shap_vals.ndim == 3:  # multi-class
             shap_vals = np.mean(np.abs(shap_vals), axis=-1)
-        return shap_vals
+        return shap_vals.astype(np.float32)
 
     @staticmethod
     def compute_deltas(model_a, model_b, X_combined: pd.DataFrame):
