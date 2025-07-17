@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    tmux \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create working directory (usually bind-mounted to your host code)
