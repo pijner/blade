@@ -45,6 +45,23 @@ def focal_loss(gamma=2.0, alpha=None):
     return loss
 
 
+class SHAPWrapper:
+    def __init__(self, model, num_cont_features):
+        self.model = model
+        self.num_cont_features = num_cont_features
+
+    def __call__(self, X):
+        # X is a 2D array of shape (n_samples, total_features)
+        X = np.array(X)
+        X_cont = X[:, :self.num_cont_features].astype(np.float32)
+
+        X_cat_list = []
+        for i in range(X.shape[1] - self.num_cont_features):
+            X_cat_list.append(X[:, self.num_cont_features + i].reshape(-1, 1).astype(np.int32))
+
+        inputs = [X_cont] + X_cat_list
+        return self.model(inputs).numpy()
+
 class TensorflowMLP:
     def __init__(self, num_cont_features, cat_dims, embed_dims, num_classes, feature_names, cat_cols):
         self.num_cont_features = num_cont_features
@@ -95,30 +112,9 @@ class TensorflowMLP:
         # --- Embedded Categorical × Numeric Feature Crosses ---
         # Define which categorical + numeric pairs to cross
         # cross_pairs = [("proto", "src_bytes"), ("conn_state", "dst_port"), ("dns_RD", "src_ip_bytes")]
-        cross_pairs = []
-        cross_features = []
-
-        if cross_pairs:
-            cat_name_to_index = {name: i for i, name in enumerate(self.cat_cols)}
-            # --- Slice numeric features for cross ---
-            f = {name: self._slice(x_cont, name, self.num_feature_index) for name in self.num_feature_index}
-
-            for cat_name, num_name in cross_pairs:
-                cat_idx = cat_name_to_index[cat_name]
-                emb = x_cat_embeds[cat_idx]  # shape: (None, emb_dim)
-                num_feat = f[num_name]  # shape: (None, 1)
-
-                # Project numeric feature to match embedding dim
-                num_proj = tf.keras.layers.Dense(self.embed_dims[cat_idx])(num_feat)  # shape: (None, emb_dim)
-
-                cross = tf.keras.layers.Multiply()([emb, num_proj])
-                cross_features.append(cross)
 
         # Concatenate everything
-        if cross_features:
-            x_cross_concat = tf.keras.layers.Concatenate()(cross_features)
-            x = tf.keras.layers.Concatenate()([x_cont, x_cat_concat, x_cross_concat])
-        elif x_cat_concat is not None:
+        if x_cat_concat is not None:
             x = tf.keras.layers.Concatenate()([x_cont, x_cat_concat])
         else:
             x = x_cont
@@ -213,11 +209,16 @@ class TensorflowMLP:
         model = tf.keras.models.load_model(model_path, custom_objects={"silu": silu})
         instance = cls.__new__(cls)
         instance.model = model
-        instance.num_cont_features = model.input_shape[0][1]
-        instance.cat_dims = [input.shape[1] for input in model.inputs[1:]]
-        instance.embed_dims = [
-            layer.output.shape[-1] for layer in model.layers if isinstance(layer, tf.keras.layers.Embedding)
-        ]
+        if len(model.inputs) > 1:
+            instance.num_cont_features = model.input_shape[0][1]
+            instance.cat_dims = [input.shape[1] for input in model.inputs[1:]]
+            instance.embed_dims = [
+                layer.output.shape[-1] for layer in model.layers if isinstance(layer, tf.keras.layers.Embedding)
+            ]
+        else:
+            instance.num_cont_features = model.input_shape[1]
+            instance.cat_dims = []
+            instance.embed_dims = []
         instance.num_classes = model.output.shape[-1]
         return instance
 
