@@ -80,7 +80,7 @@ class TensorflowMLP:
     def _residual_block(self, x, units, dropout_rate=0.1):
         shortcut = x
         x = tf.keras.layers.Dense(units)(x)
-        x = tf.keras.layers.Activation(tf.nn.gelu)(x)
+        x = tf.keras.layers.Activation("relu")(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Dropout(dropout_rate)(x)
         # If dimensions differ, project shortcut
@@ -122,12 +122,12 @@ class TensorflowMLP:
         # --- Dense Network ---
         for i, units in enumerate([256, 256, 128, 64, 32]):
             if i % 2 == 0:
-                x = tf.keras.layers.Dense(units, activation=tf.nn.gelu)(x)
+                x = tf.keras.layers.Dense(units, activation="relu")(x)
                 x = tf.keras.layers.BatchNormalization()(x)
                 x = tf.keras.layers.Dropout(0.2)(x)
             else:
                 x = self._residual_block(x, units, dropout_rate=0.2)
-        x = tf.keras.layers.Dense(32, activation=tf.nn.gelu)(x)
+        x = tf.keras.layers.Dense(32, activation="relu")(x)
         x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Dropout(0.1)(x)
 
