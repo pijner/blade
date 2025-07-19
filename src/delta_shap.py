@@ -8,12 +8,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
 from pathlib import Path
+from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
-from src.model_factory import set_seed
+from src.model_factory import set_seed, SHAPWrapper
 from src.pre_processing import GenericPreProcessor
 from src.model_training import ModelTrainer, load_data, train_models, load_models, prepare_data_for_training
 from src.backdoor_attack import BackdoorPoisoner
@@ -34,13 +35,13 @@ class DeltaSHAP:
     def compute_shap_values_batched(explainer, X_to_explain, batch_size=64):
         shap_vals = []
         num_samples = X_to_explain[0].shape[0] if isinstance(X_to_explain, list) else X_to_explain.shape[0]
-        for i in range(0, num_samples, batch_size):
+        for i in tqdm(range(0, num_samples, batch_size)):
             batch = (
                 [_x[i : i + batch_size] for _x in X_to_explain]
                 if isinstance(X_to_explain, list)
                 else X_to_explain[i : i + batch_size]
             )
-            with tf.device("/cpu:0"):
+            with tf.device("/gpu:0"):
                 vals = explainer.shap_values(batch)
             if isinstance(vals, list):  # multi-class
                 vals = np.mean(np.abs(vals), axis=0)
@@ -56,12 +57,14 @@ class DeltaSHAP:
             if model.model_type == "tf_mlp":
                 background = model.model.make_inputs(*model.prepare_inputs(background))
                 X = model.model.make_inputs(*model.prepare_inputs(X))
-                explainer = shap.KernelExplainer(model.model.model, background)
+                background = np.hstack(background)
+                X = np.hstack(X)
+                explainer = shap.KernelExplainer(SHAPWrapper(model.model.model, model.model.num_cont_features), background)
             else:
                 explainer = shap.GradientExplainer(model.model, background)
 
         # try predicting for sanity
-        shap_vals = DeltaSHAP.compute_shap_values_batched(explainer, X, batch_size=100000)
+        shap_vals = DeltaSHAP.compute_shap_values_batched(explainer, X, batch_size=len(X))
 
         if shap_vals.ndim == 3:  # multi-class
             shap_vals = np.mean(np.abs(shap_vals), axis=-1)
